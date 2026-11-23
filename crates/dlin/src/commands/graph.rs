@@ -35,7 +35,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     )?;
     let dag = build.graph();
 
-    // Merge CLI positional args and stdin, then resolve file paths to node names
+    // Merge CLI positional args and stdin, then expand file paths to focus inputs
     let stdin_lines = input::read_stdin_lines();
     let mut raw_inputs = args.model;
     raw_inputs.extend(stdin_lines);
@@ -44,7 +44,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
@@ -219,7 +219,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
     )?;
     let dag = build.graph();
 
-    // Merge CLI positional args and stdin, then resolve file paths to node names
+    // Merge CLI positional args and stdin, then expand file paths to focus inputs
     let stdin_lines = input::read_stdin_lines();
     let mut raw_inputs = args.model;
     raw_inputs.extend(stdin_lines);
@@ -228,7 +228,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
@@ -449,27 +449,22 @@ pub(crate) fn run_impact_command(
     )?;
     let dag = build.graph();
 
-    // Resolve file paths to model names (same as graph/list commands)
+    // Expand file paths to focus inputs (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
 
-    // Deduplicate while preserving order
-    let mut seen = HashSet::new();
-    let models: Vec<String> = models
-        .into_iter()
-        .filter(|m| seen.insert(m.clone()))
-        .collect();
-
     let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
+    let mut seen = HashSet::new();
     let reports: Vec<_> = focus_nodes
         .into_iter()
+        .filter(|&idx| seen.insert(idx))
         .filter_map(|source_idx| graph::impact::compute_impact(&build, source_idx, &scope))
         .collect();
 

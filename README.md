@@ -394,6 +394,8 @@ For `graph`, `list`, and `impact`, an exact unique ID takes precedence. A short 
 
 When `graph` follows a focus upstream in SQL mode, it reports the reached nodes whose dependencies were not fully extracted, because they can hide part of the upstream lineage. The JSON output has an `exploration` object with each node's `unique_id`, its shortest `depth` from a focus, and the reasons. A node at the depth limit is not reported. `--node-type` and `--select` do not hide these reports. Other formats print a summary on stderr, and `--verbose` lists each node. The MCP `get_lineage` tool returns the same `exploration`. With a manifest, dependencies are taken as declared and nothing is reported.
 
+An SQL file path selects the node with that file path by unique ID, even when other packages have a model with the same name. If multiple nodes share the path, dlin reports their IDs so you can select one. YAML paths expand to resource names.
+
 ### `list`
 
 ```sh

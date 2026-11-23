@@ -57,17 +57,12 @@ pub(crate) fn run_column_lineage_command(
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(SourceType::Manifest, &project_dir, None)?;
-        // Snapshot all user-provided inputs (both bare names and file paths) before path
-        // expansion.  Path-like strings (e.g. "models/stg.sql") are stored verbatim and
-        // will never match the expanded model names produced by resolve_stdin_inputs, so
-        // they remain subject to the model-only filter below.  Bare names (e.g.
-        // "raw.orders") appear unchanged in both this set and all_resolved, which exempts
-        // them from the model-only filter so they reach the analyzer and surface a proper
-        // error rather than being silently dropped.
+        // Keep explicit names so the analyzer can report errors for unsupported
+        // resources. Filter out non-models introduced by path expansion below.
         let raw_input_set: std::collections::HashSet<&str> =
             raw_inputs.iter().map(|s| s.as_str()).collect();
         let all_resolved =
-            input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd);
+            input::resolve_stdin_inputs(&raw_inputs, &dag, &resolved_paths, &project_dir, &cwd)?;
         // Filter out non-model nodes (sources, tests, analyses) that may come from YAML/SQL
         // file-path expansion — column lineage only supports resource_type == "model".
         // Unsupported resource kinds are omitted from the DAG, so check the
@@ -82,6 +77,10 @@ pub(crate) fn run_column_lineage_command(
         for name in all_resolved {
             let resolved = graph::filter::find_node_by_name(&dag, &name)?;
             if raw_input_set.contains(name.as_str())
+                || manifest
+                    .nodes
+                    .get(&name)
+                    .is_some_and(|node| node.resource_type == "model")
                 || manifest_model_names.contains(name.as_str())
                 || resolved.is_none()
             {
@@ -118,14 +117,18 @@ pub(crate) fn run_column_lineage_command(
         graph::column_lineage::ColumnLineageAnalysis::new(&manifest, dialect, &mut cache)
             .with_seed_schemas(&seeds);
 
+    let mut reported_ids = HashSet::new();
     let reports: Vec<_> = models
         .iter()
-        .map(|model| {
+        .filter_map(|model| {
             let mut report = analysis.compute_cross_model_column_lineage(model);
+            if !reported_ids.insert(report.unique_id.clone()) {
+                return None;
+            }
             if !column_filter.is_empty() {
                 report.select_columns(&column_filter, dialect);
             }
-            report
+            Some(report)
         })
         .collect();
 

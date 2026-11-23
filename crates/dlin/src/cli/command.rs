@@ -55,8 +55,7 @@ Completeness:
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-  File paths (detected by extension or path separator) are resolved to model names \
-  using the dbt project configuration.
+  SQL paths select a node by unique ID. YAML paths expand to resource names.
 
 Exit codes:
   0   Success (impact computed, even if no downstream dependents)

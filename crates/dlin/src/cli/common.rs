@@ -70,8 +70,7 @@ Data sources:
   the environment you want to inspect.
 
 Stdin support:
-  Accepts model names or file paths from stdin. File paths (detected by extension \
-or path separators) are resolved to model names automatically.
+  Accepts model names or file paths from stdin. SQL paths select a node by unique ID. YAML paths expand to resource names.
 
 Exit codes:
   0   Success

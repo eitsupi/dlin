@@ -38,6 +38,12 @@ pub enum DbtLineageError {
         candidates: Vec<String>,
     },
 
+    #[error("ambiguous node path '{path}': {}. Specify a unique_id.", .candidates.join(", "))]
+    AmbiguousNodePath {
+        path: String,
+        candidates: Vec<String>,
+    },
+
     #[error("cycle detected in lineage graph")]
     CycleDetected,
 

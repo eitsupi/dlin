@@ -88,7 +88,7 @@ JSON output: array of objects with unique_id, label, node_type, and metadata.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line).
-  File paths are resolved to model names using dbt project configuration.",
+  SQL paths select a node by unique ID. YAML paths expand to resource names.",
     after_long_help = "\
 Examples:
   # List all models and sources

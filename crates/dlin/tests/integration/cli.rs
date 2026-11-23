@@ -854,3 +854,99 @@ fn ambiguous_name_fails_graph_list_and_impact_even_with_an_exact_input() {
         );
     }
 }
+
+#[test]
+fn sql_path_selects_the_exact_node_across_cli_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest = tmp.path().join("manifest.json");
+    std::fs::write(
+        &manifest,
+        r#"{
+          "metadata":{"adapter_type":"duckdb"},
+          "nodes":{
+            "model.b.orders":{"unique_id":"model.b.orders","name":"orders","resource_type":"model","original_file_path":"models/b/orders.sql","compiled_code":"select 2 as id"},
+            "model.a.orders":{"unique_id":"model.a.orders","name":"orders","resource_type":"model","original_file_path":"models/a/orders.sql","compiled_code":"select 1 as id"},
+            "model.a.customers":{"unique_id":"model.a.customers","name":"customers","resource_type":"model","original_file_path":"models/customers.sql","compiled_code":"select 1 as id"},
+            "snapshot.a.history":{"unique_id":"snapshot.a.history","name":"history","resource_type":"snapshot","original_file_path":"snapshots/history.sql","compiled_code":"select 1 as id"},
+            "snapshot.a.shared_b":{"unique_id":"snapshot.a.shared_b","name":"shared_b","resource_type":"snapshot","original_file_path":"snapshots/shared.sql"},
+            "snapshot.a.shared_a":{"unique_id":"snapshot.a.shared_a","name":"shared_a","resource_type":"snapshot","original_file_path":"snapshots/shared.sql"}
+          }
+        }"#,
+    )
+    .unwrap();
+    let run = |command: &[&str], inputs: &[&str]| {
+        let mut cmd = Command::new(binary_path());
+        cmd.args(command).args(inputs);
+        if command[0] != "column" {
+            cmd.args(["--source", "manifest"]);
+        }
+        cmd.args([
+            "--manifest-path",
+            "manifest.json",
+            "--no-cache",
+            "-o",
+            "json",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap()
+    };
+    let json = |command: &[&str], inputs: &[&str]| {
+        let output = run(command, inputs);
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    let path = "models/a/orders.sql";
+    for (command, key, label) in [
+        (&["graph"][..], "/nodes/0", "/nodes/0/label"),
+        (&["list"][..], "/0", "/0/label"),
+        (&["impact"][..], "/0/source_node", "/0/source_model"),
+        (&["column", "upstream"][..], "/0", "/0/model"),
+    ] {
+        let result = json(command, &[path]);
+        let node = result.pointer(key).unwrap();
+        assert_eq!(node["unique_id"], "model.a.orders", "{command:?}");
+        assert_eq!(result.pointer(label).unwrap(), "orders", "{command:?}");
+
+        let output = run(command, &[path, "orders"]);
+        assert!(!output.status.success(), "{command:?}");
+        assert!(output.stdout.is_empty(), "{command:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("ambiguous node name 'orders': model.a.orders, model.b.orders"),
+            "{command:?}"
+        );
+    }
+
+    let output = run(&["graph"], &["snapshots/shared.sql"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "ambiguous node path 'snapshots/shared.sql': snapshot.a.shared_a, snapshot.a.shared_b. Specify a unique_id."
+    ));
+
+    for command in [&["impact"][..], &["column", "upstream"][..]] {
+        let result = json(command, &["models/customers.sql", "customers"]);
+        assert_eq!(result.as_array().unwrap().len(), 1, "{command:?}");
+    }
+
+    let result = json(&["column", "upstream"], &[path, "snapshots/history.sql"]);
+    assert_eq!(result.as_array().unwrap().len(), 1);
+    assert_eq!(result[0]["unique_id"], "model.a.orders");
+
+    let output = run(
+        &["column", "upstream"],
+        &[path, "snapshot.a.history", "missing"],
+    );
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.as_array().unwrap().len(), 3);
+    assert_eq!(
+        result[1]["errors"][0]["kind"],
+        "unsupported_materialization"
+    );
+    assert_eq!(result[2]["errors"][0]["kind"], "model_not_found");
+}

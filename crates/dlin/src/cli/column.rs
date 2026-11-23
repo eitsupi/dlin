@@ -45,10 +45,9 @@ Output columns:
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line).
-  File paths (detected by extension or path separator) are resolved to
-  model names using the dbt project configuration. Without dbt_project.yml,
-  path inputs use the standard dbt layout; use model names with a standalone
-  manifest from a project with custom paths.
+  SQL paths select a node by unique ID. YAML paths expand to resource names.
+  Without dbt_project.yml, path inputs use the standard dbt layout; use model
+  names with a standalone manifest from a project with custom paths.
 
 Output format (-o/--output):
   json (default)  JSON array per model with the following structure:

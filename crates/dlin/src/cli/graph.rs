@@ -58,7 +58,7 @@ detail on fewer endpoint nodes.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-File paths are resolved to model names using dbt project configuration.
+SQL paths select a node by unique ID. YAML paths expand to resource names.
 
 Column-level analysis:
   This command works at the model level (bidirectional, with -u/-d depth control).
