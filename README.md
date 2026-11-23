@@ -369,13 +369,14 @@ Results are split into `confirmed` impacts, `possible` impacts reached through a
 
 Correctness-gated means from the synthetic scalability run (3 runs, 1 warmup):
 
-| Workload | dlin 0.2.4 | [Parrant 0.17.2](https://pypi.org/project/parrant/0.17.2/) | [dbt-meta 0.3.8](https://pypi.org/project/dbt-meta/0.3.8/) |
+| Workload | dlin 0.3.0-rc.1, no cache / warm cache | [Parrant 0.21.1](https://pypi.org/project/parrant/0.21.1/) | [dbt-meta 0.3.10](https://pypi.org/project/dbt-meta/0.3.10/), build + query |
 | --- | ---: | ---: | ---: |
-| Volume, 100,150 columns, single upstream | 88.9 ms | 37.4 s | build >120 s timeout; query not run |
-| Deep 64, single upstream | 115 ms | 1.42 s | build 4.86 s; query 411 ms |
-| Fan-out 128, downstream | 114 ms | 1.78 s | build 6.47 s; query 363 ms |
+| Volume, 100,150 columns, single upstream | 88.5 ms / 89.2 ms | 27.1 s | build >120 s timeout; query not run |
+| Deep 64, single upstream | 152 ms / 76.9 ms | 810 ms | 1.83 s + 326 ms |
+| Fan-out 128, downstream | 136 ms / 38.7 ms | 1.48 s | 4.16 s + 362 ms |
+| Wide 200 columns × 8 models, single upstream | 539 ms / 262 ms | 932 ms | 7.46 s + 348 ms |
 
-These synthetic results use artifacts derived from the real dbt fixture. Native Rust avoids Python startup and dlin showed lower latency here; dlin uses `--no-cache`, Parrant includes parsing, and dbt-meta query excludes build. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
+These synthetic results use artifacts derived from the real dbt fixture. Each time is a separate process, so it includes reading the artifacts. dlin "no cache" uses `--no-cache` and includes SQL analysis; "warm cache" reuses a cache filled once by the same query. Parrant has no persistent cache and includes parsing. dbt-meta builds a lineage artifact once and then queries it, so its end-to-end time is build plus query. They are not a general ranking; see the [full results and reproduction](benchmarks/column-lineage/results/published/scalability/summary.md).
 
 ### Known limitations
 

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -311,6 +312,26 @@ def measure(record: dict, argv: list[str], benchmark_dir: Path, runs: int, warmu
     record.update({"command": timed, "hyperfine": command_string(invocation), "hyperfine_json": rel(hyperfine_json), "raw_stdout": rel(raw_stdout), "raw_stderr": rel(raw_stderr), "exit_code": exit_code, "status": status, "reason": reason, "sample_count": sample_count, "timeout_seconds": timeout, "outer_timeout_seconds": outer_timeout})
 
 
+def dir_size(path: Path) -> int | None:
+    if not path.is_dir():
+        return None
+    return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def dlin_warm(name: str, kind: str, argv: list[str], validator, cache_dir: Path, benchmark_dir: Path, workload: dict, timeout: int, runs: int, warmup: int, records: list[dict]) -> None:
+    """Fill a dlin cache once, then measure queries that reuse it."""
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    fill = [*argv, "--cache-dir", rel(cache_dir), "--refresh-cache"]
+    fill_exit = run_capture(fill, ROOT, timeout, benchmark_dir / f"{name}.fill.stdout", benchmark_dir / f"{name}.fill.stderr")
+    if fill_exit != 0:
+        records.append({"name": name, "tool": "dlin", "kind": kind, "command": command_string(fill), "status": "invalid", "exit_code": fill_exit, "reason": "cache fill failed", "probe_stdout": None, "probe_stderr": None, "raw_stdout": None, "raw_stderr": None, "hyperfine_json": None})
+        return
+    warm = [*argv, "--cache-dir", rel(cache_dir)]
+    if probe_and_record(name, "dlin", kind, warm, validator, benchmark_dir, workload, timeout, records):
+        records[-1]["cache_fill_command"] = command_string(fill)
+        measure(records[-1], warm, benchmark_dir, runs, warmup, timeout)
+
+
 def metadata(path: Path) -> dict:
     return {"path": rel(path), "size_bytes": path.stat().st_size, "sha256": sha256(path)}
 
@@ -350,19 +371,24 @@ def main() -> int:
         column = workload["selected_queries"]["upstream"]["column"]
         model_name_value = model_name(model)
         common = ["--manifest-path", rel(manifest_path), "-o", "json"]
+        dlin_cache = benchmark_dir / "dlin-cache"
         if workload["family"] in {"volume", "wide", "deep"}:
-            dlin_up = ["dlin", "column", "upstream", model_name_value, "--column", column, *common, "--no-cache"]
+            dlin_up_base = ["dlin", "column", "upstream", model_name_value, "--column", column, *common]
+            dlin_up = [*dlin_up_base, "--no-cache"]
             if probe_and_record("dlin_upstream", "dlin", "upstream_no_cache", dlin_up, dlin_upstream_valid, benchmark_dir, workload, args.timeout, records):
                 measure(records[-1], dlin_up, benchmark_dir, args.runs, args.warmup, args.timeout)
+            dlin_warm("dlin_upstream_warm", "upstream_warm_cache", dlin_up_base, dlin_upstream_valid, dlin_cache, benchmark_dir, workload, args.timeout, args.runs, args.warmup, records)
             if workload["family"] == "wide":
                 whole_dlin = ["dlin", "column", "upstream", model_name_value, *common, "--no-cache"]
                 if probe_and_record("dlin_whole_model", "dlin", "whole_model_no_cache", whole_dlin, dlin_whole_valid, benchmark_dir, workload, args.timeout, records):
                     measure(records[-1], whole_dlin, benchmark_dir, args.runs, args.warmup, args.timeout)
         if workload["family"] == "fanout":
             downstream = workload["selected_queries"]["downstream"]
-            dlin_down = ["dlin", "column", "downstream", model_name(downstream["model"]), "--column", downstream["column"], *common, "--no-cache"]
+            dlin_down_base = ["dlin", "column", "downstream", model_name(downstream["model"]), "--column", downstream["column"], *common]
+            dlin_down = [*dlin_down_base, "--no-cache"]
             if probe_and_record("dlin_downstream", "dlin", "downstream_no_cache", dlin_down, dlin_downstream_valid, benchmark_dir, workload, args.timeout, records):
                 measure(records[-1], dlin_down, benchmark_dir, args.runs, args.warmup, args.timeout)
+            dlin_warm("dlin_downstream_warm", "downstream_warm_cache", dlin_down_base, dlin_downstream_valid, dlin_cache, benchmark_dir, workload, args.timeout, args.runs, args.warmup, records)
         parrant_up = ["parrant", "--manifest", rel(manifest_path), "--catalog", rel(catalog_path), "--select", f"+{model_name_value}.{column}", "--format", "json"]
         if workload["family"] in {"volume", "wide", "deep"}:
             if probe_and_record("parrant_upstream", "parrant", "upstream_parse_included", parrant_up, parrant_upstream_valid, benchmark_dir, workload, args.timeout, records):
@@ -403,7 +429,7 @@ def main() -> int:
             "warmup": args.warmup,
             "timeout_seconds": args.timeout,
             "boundaries": {
-                "dlin_cache": {"size_bytes": None, "reason": "v1 uses --no-cache because cache behavior is not yet verified"},
+                "dlin_cache": {"size_bytes": dir_size(dlin_cache), "reason": "no-cache scenarios use --no-cache; warm scenarios reuse a cache filled once by the same query with --refresh-cache"},
                 "parrant_cache": {"size_bytes": None, "reason": "no persistent cache; project parsing is included"},
                 "peak_rss": {"size_bytes": None, "reason": "N/A; no low-overhead process-tree measurement"},
             },

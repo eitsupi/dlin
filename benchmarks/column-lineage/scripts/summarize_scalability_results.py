@@ -155,11 +155,6 @@ def profile_result(profile: dict) -> dict:
     if dbt_index.get("path") and (ROOT / dbt_index["path"]).is_file():
         dbt_index = file_metadata(ROOT / dbt_index["path"], dbt_index)
     boundaries = run.get("boundaries", {})
-    if "dlin_cache" in boundaries:
-        boundaries["dlin_cache"] = {
-            **boundaries["dlin_cache"],
-            "reason": "v1 uses --no-cache because cache behavior is not yet verified",
-        }
     scenarios = [scenario_record(scenario, run["runs"]) for scenario in run.get("scenarios", [])]
     return {
         "name": name,
@@ -276,12 +271,15 @@ def markdown(result: dict) -> str:
     lines.extend([
         "## Method and limitations",
         "",
-        "- dlin uses `--no-cache`; its cold/warm cache distinction is not used here and OS cache drop is not performed.",
-        "- Parrant timings include project parsing. dbt-meta build and query are separate scenarios.",
+        "- dlin scenarios without a suffix use `--no-cache` and include manifest loading, SQL analysis and the query. `_warm` scenarios reuse a cache filled once by the same query with `--refresh-cache`. OS cache drop is not performed.",
+        "- Parrant has no persistent cache; its timings include project parsing. dbt-meta build and query are separate scenarios; its end-to-end time is build plus query.",
         "- Peak RSS is N/A. Canva is excluded. Whole-model unsupported scenarios and invalid/timeouts are shown as non-numeric statuses.",
-        "- volume-100k dbt-meta build timed out; its dependent query is not-run and has null ratios.",
-        "",
     ])
+    for profile in result["profiles"]:
+        for scenario in profile["scenarios"]:
+            if scenario["status"] == "timeout":
+                lines.append(f"- {profile['name']} {scenario['name']} timed out; scenarios that depend on it are not-run and have null ratios.")
+    lines.append("")
     return "\n".join(lines)
 
 
