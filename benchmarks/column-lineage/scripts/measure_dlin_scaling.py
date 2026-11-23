@@ -14,7 +14,6 @@ so a change meant only to speed dlin up can be checked not to change results.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shlex
 import shutil
@@ -117,13 +116,10 @@ def run_output(command: list[str]) -> str:
     return completed.stdout
 
 
-def digest(text: str) -> str:
-    """A digest of the JSON value, so formatting and key order do not count.
-
-    Array order still counts: a change in the order of results is reported.
-    """
-    value = json.loads(text)
-    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+def json_value(text: str) -> object:
+    """The JSON value of an output. Comparing values ignores formatting, key
+    order and number spelling; array order still counts."""
+    return json.loads(text)
 
 
 def measure(binaries: list[tuple[str, str]], profiles: list[str], runs: int, warmup: int) -> dict:
@@ -153,12 +149,12 @@ def measure(binaries: list[tuple[str, str]], profiles: list[str], runs: int, war
                     }
                 finally:
                     shutil.rmtree(cache, ignore_errors=True)
-                digests = {mode: digest(text) for mode, text in outputs.items()}
-                if len(set(digests.values())) != 1:
+                values = {mode: json_value(text) for mode, text in outputs.items()}
+                if not values["no_cache"] == values["fill"] == values["warm"]:
                     mismatches.append(f"{name} {label} {binary_label}: outputs differ between cache modes")
                 if reference is None:
-                    reference = (binary_label, digests["no_cache"])
-                elif digests["no_cache"] != reference[1]:
+                    reference = (binary_label, values["no_cache"])
+                elif values["no_cache"] != reference[1]:
                     mismatches.append(f"{name} {label}: {binary_label} output differs from {reference[0]}")
             rows.append(row)
             print(f"measured {name} {label}", file=sys.stderr)
