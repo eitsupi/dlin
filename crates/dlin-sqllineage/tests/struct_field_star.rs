@@ -105,16 +105,47 @@ fn qualifier_without_range_variable_stays_a_relation_elsewhere() {
 
 #[test]
 fn column_next_to_field_star_of_unknown_type_is_not_complete() {
-    // Without the type of item, its fields may include another flag.
+    for dialect in [
+        Dialect::BigQuery,
+        Dialect::Databricks,
+        Dialect::Spark,
+        Dialect::DuckDb,
+    ] {
+        let sql = r#"WITH e AS (SELECT item.*, 2 AS flag FROM src) SELECT flag FROM e"#;
+        assert_eq!(
+            render(sql, dialect),
+            ["flag#0 P[ | Unverified(flag: cte e | )]", "Closed"],
+            "{dialect}"
+        );
+    }
     for sql in [
         r#"WITH e AS (SELECT p.item.*, 2 AS flag FROM src AS p) SELECT flag FROM e"#,
-        r#"WITH e AS (SELECT item.*, 2 AS flag FROM src) SELECT flag FROM e"#,
         r#"WITH e AS (SELECT (src.item).*, 2 AS flag FROM src) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT a.*, b.*, 2 AS flag FROM src) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT a.*, b.* FROM src) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT item.*, 2 AS flag FROM src), w AS (SELECT * FROM e) SELECT flag FROM w"#,
+        r#"WITH e AS (SELECT item.* FROM src), f AS (SELECT 2 AS flag) SELECT flag FROM e CROSS JOIN f"#,
+        r#"WITH e AS (SELECT item.*, 2 AS flag FROM src), f AS (SELECT 3 AS flag) SELECT flag FROM e JOIN f USING (flag)"#,
     ] {
-        assert_eq!(
-            render(sql, Dialect::BigQuery),
-            ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"],
-            "{sql}"
+        let analysis = analyze_one_with(sql, Dialect::BigQuery, None);
+        let rendered = render_output(&analysis.output);
+        assert!(
+            rendered[0].contains("Unverified(flag:"),
+            "{sql}: {rendered:?}"
+        );
+    }
+}
+
+#[test]
+fn known_duplicate_names_remain_ambiguous_with_an_unknown_field_star() {
+    for sql in [
+        r#"WITH e AS (SELECT item.*, 2 AS flag, 3 AS flag FROM src) SELECT flag FROM e"#,
+        r#"WITH e AS (SELECT item.*, 2 AS flag FROM src), f AS (SELECT 3 AS flag) SELECT flag FROM e CROSS JOIN f"#,
+    ] {
+        let rendered = render(sql, Dialect::BigQuery);
+        assert!(
+            rendered[0].contains("Ambiguous(flag:"),
+            "{sql}: {rendered:?}"
         );
     }
 }
@@ -281,7 +312,7 @@ fn struct_whose_field_names_are_not_all_known_stays_open() {
     ] {
         assert_eq!(
             render(sql, Dialect::BigQuery),
-            ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"],
+            ["flag#0 P[ | Unverified(flag: cte e | )]", "Closed"],
             "{sql}"
         );
     }
@@ -446,6 +477,6 @@ fn struct_constructor_of_another_dialect_is_not_assumed() {
             "#,
             Dialect::BigQuery,
         ),
-        ["flag#0 P[ | Ambiguous(flag: cte e)]", "Closed"]
+        ["flag#0 P[ | Unverified(flag: cte e | )]", "Closed"]
     );
 }

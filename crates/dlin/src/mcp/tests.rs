@@ -77,6 +77,11 @@ fn row_value_alias_state() -> (tempfile::TempDir, McpState) {
       "columns": {"x": {"name": "x"}},
       "compiled_code": "WITH latest AS (SELECT ARRAY_AGG(t ORDER BY t.updated_at DESC LIMIT 1)[OFFSET(0)] AS event FROM `p`.`d`.`external_table_a` AS t) SELECT event.x AS x FROM latest"
     },
+    "model.test.field_star": {
+      "unique_id": "model.test.field_star", "name": "field_star",
+      "resource_type": "model", "depends_on": {"nodes": []},
+      "compiled_code": "WITH expanded AS (SELECT s.item.*, 2 AS flag FROM src s) SELECT flag FROM expanded"
+    },
     "model.test.deep": {
       "unique_id": "model.test.deep", "name": "deep",
       "resource_type": "model", "depends_on": {"nodes": []},
@@ -178,6 +183,40 @@ fn mcp_explicit_supported_dialect_has_no_warning() {
     .unwrap();
 
     assert!(body(&result).get("warnings").is_none());
+}
+
+#[test]
+fn mcp_reports_unknown_field_star_overlap_as_partial() {
+    let (_tmp, state) = row_value_alias_state();
+    let result = get_column_lineage(
+        &json!({"model": "field_star", "column": "flag", "direction": "upstream", "detail": "full"}),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(result["status"], "partial", "{result}");
+    assert!(
+        result["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["kind"] == "column_indeterminate" }),
+        "{result}"
+    );
+    assert!(
+        !result["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| { error["kind"] == "column_ambiguous" }),
+        "{result}"
+    );
+    let downstream = get_column_lineage(
+        &json!({"model": "field_star", "column": "flag", "direction": "downstream", "detail": "full"}),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(downstream["exploration"][0]["status"], "incomplete");
+    assert_eq!(downstream["errors"][0]["kind"], "column_indeterminate");
 }
 
 #[test]

@@ -998,6 +998,7 @@ pub enum UnresolvedReason {
         /// the query binds.
         present_candidates: Vec<UnresolvedCandidate>,
         /// Candidates whose columns are not known and may carry the name.
+        /// Empty when the possible providers could not be named.
         possible_candidates: Vec<UnresolvedCandidate>,
     },
     /// A column read from another model matches more than one of that model's
@@ -1079,6 +1080,9 @@ impl std::fmt::Display for UnresolvedReason {
                 present_candidates,
                 possible_candidates,
             } => {
+                if possible_candidates.is_empty() {
+                    return write!(f, "'{column}' may be provided by an unexpanded star");
+                }
                 let possible: Vec<String> = possible_candidates
                     .iter()
                     .map(ToString::to_string)

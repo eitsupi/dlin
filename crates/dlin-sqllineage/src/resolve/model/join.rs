@@ -9,7 +9,7 @@ use super::{
     ColumnSlot, Group, OutputElement, RangeRef, SlotOrigin, UnknownProvider, ValueId,
     unknown_publishers,
 };
-use crate::graph::scope::{JoinMerge, JoinMergeKind, JoinOperand, MergedColumns};
+use crate::graph::scope::{Binding, JoinMerge, JoinMergeKind, JoinOperand, MergedColumns};
 use crate::types::Evidence;
 use crate::{Dialect, Ident, OutputName, Relation};
 
@@ -219,8 +219,28 @@ fn take_key(
             let OutputElement::Column(slot) = elements.remove(index) else {
                 unreachable!("a key slot is a column");
             };
+            let mut value = slot.value;
+            if let [range] = &*slot.ranges
+                && let Binding::Cte(scope) | Binding::DerivedTable(scope) = range.binding
+            {
+                for element in elements.iter_mut() {
+                    if let OutputElement::Unknown(segment) = element
+                        && matches!(&*segment.ranges, [owner] if owner.index == range.index)
+                        && segment.domain.admits(key, dialect)
+                    {
+                        // The key is one name on this side. Read it by name
+                        // so the child decides whether the star competes with
+                        // the listed column; the merged output publishes it once.
+                        segment.domain.removed.push(key.clone());
+                        value = ValueId::ScopeName {
+                            scope,
+                            column: key.clone(),
+                        };
+                    }
+                }
+            }
             KeySide {
-                value: slot.value,
+                value,
                 candidate_ranges: slot.candidate_ranges,
                 ranges: slot.ranges,
                 names: Some((slot.name, slot.output_name)),

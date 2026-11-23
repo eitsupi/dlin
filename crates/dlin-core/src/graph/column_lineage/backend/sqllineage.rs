@@ -474,7 +474,12 @@ pub(crate) fn lineage_failure(lineage: &Lineage) -> Option<OutputFailure> {
                 .join(" or ");
             (
                 OutputFailureKind::Indeterminate,
-                if present.is_empty() {
+                if possible.is_empty() {
+                    format!(
+                        "column '{}' may be provided by an unexpanded star",
+                        column.value
+                    )
+                } else if present.is_empty() {
                     format!(
                         "column '{}' may come from {possible}, whose columns are not known",
                         column.value

@@ -5,9 +5,8 @@
 //! publish it. Providers are the enumerated columns that carry the name and the
 //! unknown segments whose name conditions still admit it; a relation whose
 //! catalog columns lack the name, or a CTE or derived table that lists no such
-//! column and has no unknown segment, is not a provider. Several providers make
-//! the name ambiguous, whichever of them list the column and whichever may
-//! merely hide it behind a star.
+//! column and has no unknown segment, is not a provider. Several providers can
+//! leave a name unverified when one or more could hide it behind a star.
 //!
 //! The same function answers a reference in a FROM clause and a reference to a
 //! column of a scope, because both read a model's elements: a scope that reads a
@@ -37,15 +36,11 @@ pub(in crate::resolve) struct Ambiguity {
     /// The enumerated columns among the providers, which decide the transform
     /// of a value that is read through the ambiguity.
     pub listed: Vec<usize>,
-    /// Whether the name has no single owner whatever the columns that are not
-    /// known turn out to be: a join over duplicated range variables, or a
-    /// provider that is ambiguous about the name itself. Otherwise the
-    /// providers compete, and only `present` are known to publish the name.
+    /// Whether the providers already establish a conflict.
     pub certain: bool,
     /// The candidates known to publish the name.
     pub present: Vec<Candidate>,
-    /// How many providers are known to publish the name. Two make the name
-    /// ambiguous whatever the others carry.
+    /// How many providers are known to publish the name.
     pub known: usize,
     /// Whether one of them is a column the model defines itself, which has
     /// no range variable to name it: the scope that is read stands for it.
@@ -160,7 +155,7 @@ impl OutputModel {
                                 }
                                 present.iter().chain(&possible).cloned().collect()
                             },
-                            known: !present.is_empty(),
+                            known: inner.known > 0,
                             present,
                             ambiguous: false,
                             uncertain: true,
@@ -185,6 +180,7 @@ impl OutputModel {
             // A column several ranges merged is one provider, unless one of
             // those ranges is itself ambiguous about the name.
             let mut unit = Unit::own(index, Vec::new(), listed);
+            let mut known_contributor = false;
             for range in merged.iter() {
                 let inner = self
                     .reads
@@ -196,6 +192,9 @@ impl OutputModel {
                         _ => None,
                     });
                 let Some((child, inner)) = inner else {
+                    if listed {
+                        known_contributor = true;
+                    }
                     let candidate = range.candidate();
                     if listed {
                         unit.present.extend(candidate.clone());
@@ -210,6 +209,7 @@ impl OutputModel {
                     unit.candidates
                         .extend(present.iter().chain(&possible).cloned());
                     unit.present.extend(present);
+                    known_contributor |= inner.known > 0;
                     unit.uncertain = true;
                 } else {
                     unit.candidates.extend(inner.candidates);
@@ -217,7 +217,7 @@ impl OutputModel {
                 }
             }
             if unit.uncertain {
-                unit.known = !unit.present.is_empty();
+                unit.known = known_contributor;
             }
             units.push(unit);
         }
@@ -254,8 +254,9 @@ impl OutputModel {
         let mut candidates = Vec::new();
         let mut listed = Vec::new();
         let mut present: Vec<Candidate> = Vec::new();
-        let certain = units.iter().any(|unit| unit.ambiguous);
         let known = units.iter().filter(|unit| unit.known).count();
+        let possible = units.iter().any(|unit| !unit.known || unit.uncertain);
+        let certain = known > 1 || !possible || units.iter().any(|unit| unit.ambiguous);
         let defined = units
             .iter()
             .any(|unit| unit.known && unit.candidates.is_empty());
@@ -335,7 +336,7 @@ impl OutputModel {
         &self,
         ambiguity: &Ambiguity,
     ) -> Option<(Vec<Candidate>, Vec<Candidate>)> {
-        if ambiguity.certain || ambiguity.known > 1 || self.has_alternative_ranges() {
+        if ambiguity.certain || self.has_alternative_ranges() {
             return None;
         }
         let present = ambiguity.present.clone();
@@ -345,7 +346,8 @@ impl OutputModel {
                 possible.push(candidate.clone());
             }
         }
-        (!possible.is_empty()).then_some((present, possible))
+        // A field or expression star may have no relation candidate to name.
+        Some((present, possible))
     }
 
     /// Whether two ranges share a name.
