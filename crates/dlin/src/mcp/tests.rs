@@ -1284,13 +1284,15 @@ fn lineage_reports_skipped_sql_project_inputs_when_upstream_can_expand() {
     use dlin_core::parser::discovery::DiscoveredFiles;
 
     let tmp = tempfile::tempdir().unwrap();
-    let model = tmp.path().join("root.sql");
-    let yaml = tmp.path().join("broken.yml");
+    // Discovery yields canonical paths, which the reported path is relative to.
+    let project_dir = tmp.path().canonicalize().unwrap();
+    let model = project_dir.join("root.sql");
+    let yaml = project_dir.join("broken.yml");
     std::fs::write(&model, "select 1 as id").unwrap();
     std::fs::write(&yaml, "sources: [").unwrap();
     let mut state = state();
     state.build = build_graph_report(
-        tmp.path(),
+        &project_dir,
         "project",
         &DiscoveredFiles {
             model_sql_files: vec![model],
