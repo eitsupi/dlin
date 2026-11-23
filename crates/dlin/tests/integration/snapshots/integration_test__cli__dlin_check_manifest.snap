@@ -1,0 +1,84 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Helper for working with manifest.json — checks whether it needs to be regenerated.
+
+Since `dbt compile` can be slow (seconds to tens of seconds depending on project size and warehouse connection), this command lets you skip unnecessary recompilation by detecting whether any project files have changed since the manifest was last built.
+
+Performs two checks:
+  1. Compares the modification time of manifest.json against all project SQL and YAML files (models, macros, tests, snapshots, seeds, and analyses). Files newer than the manifest are reported as 'stale'.
+  2. Reads nodes and sources from manifest.json and checks that their referenced source files still exist on disk. Missing files are reported as 'deleted'.
+
+If either stale or deleted files are found, exits with code 1.
+
+This command does not use dlin's extraction cache; it only compares file timestamps.
+
+Exit codes:
+  0   Manifest is up-to-date (no stale or deleted files)
+  1   Manifest is stale (files newer or deleted) or manifest not found
+
+Usage: dlin check-manifest [OPTIONS]
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json.
+          
+          Default: <project-dir>/target/manifest.json
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+  -o, --output <OUTPUT>
+          Output format: text (default) or json
+          
+          [default: text]
+          [possible values: text, json]
+
+  -q, --quiet
+          Suppress warning messages (exit code only)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Check and conditionally recompile
+  dlin check-manifest || dbt compile
+
+  # Quiet mode (exit code only)
+  dlin check-manifest -q
+
+  # JSON output for programmatic use
+  dlin check-manifest -o json
+
+  # Check with explicit manifest path
+  dlin check-manifest --manifest-path path/to/manifest.json

@@ -1,0 +1,173 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Analyze downstream column-level impact of changing a column.
+
+Direction: downstream only. Starting from a specific column, follows forward
+edges to find all dependent models and columns. There are no -u/-d depth flags
+— all downstream dependents are always included.
+
+This is the reverse direction of `dlin column upstream` (which traces upstream
+sources). To trace where a column's data comes from, use `dlin column upstream`.
+
+Takes a single model and one or more --column flags (required).
+
+There is no --source flag; manifest.json is the only data source (unlike
+`dlin graph`/`dlin impact` which support both SQL files and manifest).
+
+Requires compiled SQL in manifest.json — run `dbt compile` first.
+Use `dlin check-manifest` to verify freshness before querying.
+
+Limitations:
+  - Value dependencies only: columns used only in filters and join
+    conditions (row dependencies) are not collected.
+  - Unknown columns behind SELECT *, unsupported SQL and ambiguous names
+    leave lineage partial.
+  - A STRUCT field can be traced to the inputs of the whole STRUCT, so a
+    complete result can include the inputs of sibling fields. This happens
+    across dbt model boundaries, and through CAST, CASE, set operations,
+    array subscripts or UNNEST of an array built elsewhere.
+  - A YAML column list used as a schema is treated as exhaustive. Results
+    that rely on it cite it in evidence[] and show an "assumes" note.
+  In JSON, possible[] lists unconfirmed targets, exploration[] lists gaps
+  that may hide further targets, and errors[] holds diagnostics.
+
+Output format (-o/--output):
+  json (default)  JSON array per column:
+    model, column     the analysed input
+    input             the model output that the column names, or absent when it
+                      names none or several (the exploration then has an
+                      "unidentified_input" gap; dependents that name the
+                      column are still searched by that name, and their paths
+                      start at an "unidentified_column" that does not stand
+                      for one particular output of the model)
+    scope             "value_only"
+    confirmed[]       downstream columns that depend on the input through known
+                      edges (target, kind, transformation, path of edges).
+                      evidence[] (omitted if empty) lists the schema evidence
+                      ids the path relies on
+    possible[]        concrete downstream targets that may depend on the input
+                      through finite unresolved paths; paths remain separate.
+                      evidence[] as for confirmed[]
+    exploration[]     per dependency kind, "complete" or "incomplete" with the
+                      gaps (unresolved lineage, failed analysis, a dependent
+                      model with unlisted columns, ...) that may hide
+                      further impacts. "no impact" is shown only when there
+                      are no confirmed or possible targets and every requested
+                      dependency kind is complete; it relies on the
+                      evidence[] of every exploration.
+    evidence[]        the schema evidence the report cites, described as for
+                      `dlin column upstream`
+    errors[]          diagnostics of the input column and of the models the
+                      search could not analyse
+  plain           human-readable text with confirmed and possible counts, scope,
+                  per-kind gaps and concrete paths. An "assumes" line names
+                  each assumed column list and the conclusions that rely on it
+  mermaid         Mermaid flowchart (LR) showing impacted columns across models,
+                  with gap and assumption notes
+  dot             Graphviz DOT format; models as clusters, columns as nodes
+                  color-coded by transformation type (pipe to `dot -Tsvg`)
+
+Exit codes:
+  0   Success
+  1   Error (model not found, no manifest, fatal analysis errors, etc.)
+
+Usage: dlin column downstream [OPTIONS] --column <COLUMN> <MODEL>
+
+Arguments:
+  <MODEL>
+          Model name to analyze column downstream impact for
+
+Options:
+      --column <COLUMN>
+          Columns to analyze impact for (required)
+
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -o, --output <OUTPUT>
+          Output format: json (default), plain, mermaid
+
+          Possible values:
+          - json:    Machine-readable JSON array (default)
+          - plain:   Human-readable plain-text table
+          - mermaid: Mermaid flowchart diagram
+          - dot:     Graphviz DOT format (pipe to `dot -Tsvg > out.svg`)
+          
+          [default: json]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --dialect <DIALECT>
+          SQL dialect for parsing compiled SQL. Auto-detected from manifest.metadata.adapter_type when omitted. Recognized dialects removed from the active backend fall back to Generic with a warning
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json (default: <project-dir>/target/manifest.json)
+
+      --cache-dir <CACHE_DIR>
+          Directory for caching column lineage results (default: <project-dir>/.dlin_cache)
+          
+          [env: DLIN_CACHE_DIR=]
+
+      --no-cache
+          Disable column lineage cache
+          
+          [env: DLIN_NO_CACHE=]
+
+      --refresh-cache
+          Discard existing cache and rebuild from scratch
+          
+          [env: DLIN_REFRESH_CACHE=]
+
+  -q, --quiet
+          Suppress warning messages
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Impact of changing a single column (JSON output)
+  dlin column downstream stg_orders --column order_id
+
+  # Human-readable plain output
+  dlin column downstream stg_orders --column order_id -o plain
+
+  # Mermaid flowchart
+  dlin column downstream stg_orders --column order_id -o mermaid
+
+  # Impact of multiple columns
+  dlin column downstream stg_orders --column order_id --column status
+
+  # With explicit manifest path
+  dlin column downstream stg_orders --column order_id --manifest-path target/manifest.json
+
+  # BigQuery project
+  dlin column downstream stg_orders --column order_id --dialect bigquery

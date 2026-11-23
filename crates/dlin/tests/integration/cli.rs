@@ -14,174 +14,45 @@ fn test_help_flag() {
     assert!(stdout.contains("--project-dir"));
 }
 
+/// The long help of a command. The environment is cleared, since clap shows
+/// the values of the environment variables that back options.
 fn long_help(args: &[&str]) -> String {
     let output = Command::new(binary_path())
+        .env_clear()
         .args(args)
         .arg("--help")
         .output()
         .expect("Failed to run binary");
-    assert!(output.status.success());
+    assert!(output.status.success(), "{args:?}");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// The section of a help text that starts at the line `heading`, up to the
-/// next unindented line.
-fn help_section(help: &str, heading: &str) -> String {
-    let mut lines = help.lines().skip_while(|line| *line != heading);
-    let mut section = vec![
-        lines
-            .next()
-            .unwrap_or_else(|| panic!("no {heading:?} in:\n{help}")),
-    ];
-    section.extend(lines.take_while(|line| line.is_empty() || line.starts_with(' ')));
-    section.join("\n").trim_end().to_string()
-}
-
+/// The help of every command is part of the interface that users and agents
+/// read, including its known limitations, so each one is a snapshot.
 #[test]
-fn column_help_describes_the_command_and_its_limitations() {
-    let help = long_help(&["column"]);
-    let description = help.split("\nUsage:").next().unwrap().trim_end();
-    insta::assert_snapshot!(description, @r#"
-    Column-level lineage and impact analysis.
-
-    Unlike `dlin graph` (model-level, bidirectional, with -u/-d depth control),
-    column analysis is split by direction — each subcommand covers one direction:
-
-      upstream    — traces where each output column's data came from
-      downstream  — finds which models/columns are affected by a column change
-
-    There are no -u/-d depth flags; the full chain is always traversed in both cases.
-
-    Unlike `dlin graph`/`dlin impact`, there is no --source flag — manifest.json is the only
-    data source for column-level analysis.
-
-    Both subcommands require manifest.json with compiled SQL (run `dbt compile` first).
-    Use `dlin check-manifest` to verify freshness before querying.
-
-    Limitations:
-      - Value dependencies only: columns used only in filters and join
-        conditions (row dependencies) are not collected.
-      - Unknown columns behind SELECT *, unsupported SQL and ambiguous names
-        leave lineage partial.
-      - A STRUCT field can be traced to the inputs of the whole STRUCT, so a
-        complete result can include the inputs of sibling fields. This happens
-        across dbt model boundaries, and through CAST, CASE, set operations,
-        array subscripts or UNNEST of an array built elsewhere.
-      - A YAML column list used as a schema is treated as exhaustive. Results
-        that rely on it cite it in evidence[] and show an "assumes" note.
-    "#);
-}
-
-#[test]
-fn column_subcommands_state_the_limitations_and_where_to_check_them() {
-    // A reader of either subcommand's help alone must learn what a result
-    // cannot show, and where to check it.
-    let upstream = long_help(&["column", "upstream"]);
-    insta::assert_snapshot!(help_section(&upstream, "Limitations:"), @r#"
-    Limitations:
-      - Value dependencies only: columns used only in filters and join
-        conditions (row dependencies) are not collected.
-      - Unknown columns behind SELECT *, unsupported SQL and ambiguous names
-        leave lineage partial.
-      - A STRUCT field can be traced to the inputs of the whole STRUCT, so a
-        complete result can include the inputs of sibling fields. This happens
-        across dbt model boundaries, and through CAST, CASE, set operations,
-        array subscripts or UNNEST of an array built elsewhere.
-      - A YAML column list used as a schema is treated as exhaustive. Results
-        that rely on it cite it in evidence[] and show an "assumes" note.
-      In JSON, check output.columns[].lineage.status and lineage.unresolved[],
-      output.shape for unexpanded stars, boundaries[] for where tracing stopped,
-      and errors[] for diagnostics.
-    "#);
-    insta::assert_snapshot!(help_section(&upstream, "Stdin/pipe support:"), @"
-    Stdin/pipe support:
-      Accepts model names or file paths on stdin (one per line).
-      File paths (detected by extension or path separator) are resolved to
-      model names using the dbt project configuration. Without dbt_project.yml,
-      path inputs use the standard dbt layout; use model names with a standalone
-      manifest from a project with custom paths.
-    ");
-
-    let downstream = long_help(&["column", "downstream"]);
-    insta::assert_snapshot!(help_section(&downstream, "Limitations:"), @r#"
-    Limitations:
-      - Value dependencies only: columns used only in filters and join
-        conditions (row dependencies) are not collected.
-      - Unknown columns behind SELECT *, unsupported SQL and ambiguous names
-        leave lineage partial.
-      - A STRUCT field can be traced to the inputs of the whole STRUCT, so a
-        complete result can include the inputs of sibling fields. This happens
-        across dbt model boundaries, and through CAST, CASE, set operations,
-        array subscripts or UNNEST of an array built elsewhere.
-      - A YAML column list used as a schema is treated as exhaustive. Results
-        that rely on it cite it in evidence[] and show an "assumes" note.
-      In JSON, possible[] lists unconfirmed targets, exploration[] lists gaps
-      that may hide further targets, and errors[] holds diagnostics.
-    "#);
-    insta::assert_snapshot!(help_section(&downstream, "Output format (-o/--output):"), @r#"
-    Output format (-o/--output):
-      json (default)  JSON array per column:
-        model, column     the analysed input
-        input             the model output that the column names, or absent when it
-                          names none or several (the exploration then has an
-                          "unidentified_input" gap; dependents that name the
-                          column are still searched by that name, and their paths
-                          start at an "unidentified_column" that does not stand
-                          for one particular output of the model)
-        scope             "value_only"
-        confirmed[]       downstream columns that depend on the input through known
-                          edges (target, kind, transformation, path of edges).
-                          evidence[] (omitted if empty) lists the schema evidence
-                          ids the path relies on
-        possible[]        concrete downstream targets that may depend on the input
-                          through finite unresolved paths; paths remain separate.
-                          evidence[] as for confirmed[]
-        exploration[]     per dependency kind, "complete" or "incomplete" with the
-                          gaps (unresolved lineage, failed analysis, a dependent
-                          model with unlisted columns, ...) that may hide
-                          further impacts. "no impact" is shown only when there
-                          are no confirmed or possible targets and every requested
-                          dependency kind is complete; it relies on the
-                          evidence[] of every exploration.
-        evidence[]        the schema evidence the report cites, described as for
-                          `dlin column upstream`
-        errors[]          diagnostics of the input column and of the models the
-                          search could not analyse
-      plain           human-readable text with confirmed and possible counts, scope,
-                      per-kind gaps and concrete paths. An "assumes" line names
-                      each assumed column list and the conclusions that rely on it
-      mermaid         Mermaid flowchart (LR) showing impacted columns across models,
-                      with gap and assumption notes
-      dot             Graphviz DOT format; models as clusters, columns as nodes
-                      color-coded by transformation type (pipe to `dot -Tsvg`)
-    "#);
-}
-
-#[test]
-fn top_level_help_states_the_data_sources_and_their_limitations() {
-    insta::assert_snapshot!(help_section(&long_help(&[]), "Data sources:"), @"
-    Data sources:
-      sql (default)   Interpret the Jinja in SQL files. No Python or dbt required.
-                      Detects ref() and source() calls in SQL, plus exposures from YAML.
-                      var() uses vars.yml or dbt_project.yml, then its default; CLI
-                      --vars overrides are not supported. env_var() uses its default and
-                      never reads the environment, so a different run-time value can
-                      select another dependency or branch. Values known only at run time
-                      (target, env_var() without a default, run_query() results) do not
-                      select dependencies; execute is false, as in dbt parsing.
-                      Dependencies selected through adapter.dispatch() or namespaced
-                      package macros (e.g. dbt_utils.*) may be missed; the nodes
-                      concerned are reported as partial (see dependency_analysis).
-                      Generic tests (not_null, unique, etc.) are inferred from YAML declarations
-                      with dlin-specific IDs — use manifest mode for exact dependency resolution.
-      manifest        Read a pre-compiled manifest.json, the dependency graph recorded by
-                      dbt. Requires `dbt compile` (or `dbt run`/`dbt build`) to have been
-                      run first. Use `dlin check-manifest` to verify freshness before querying.
-
-      Use sql mode for quick, local exploration without dbt setup. For exact dbt test
-      IDs, materializations or run-time dependency choices, use a manifest compiled for
-      the environment you want to inspect.
-    ");
+fn help_of_every_command() {
+    for args in [
+        &[][..],
+        &["graph"],
+        &["list"],
+        &["impact"],
+        &["summary"],
+        &["column"],
+        &["column", "upstream"],
+        &["column", "downstream"],
+        &["debug"],
+        &["debug", "parse-sql"],
+        &["debug", "trace-column"],
+        &["check-manifest"],
+        &["mcp"],
+    ] {
+        let name = std::iter::once("dlin")
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join("_")
+            .replace('-', "_");
+        insta::assert_snapshot!(name, long_help(args));
+    }
 }
 
 #[test]

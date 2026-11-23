@@ -1,0 +1,252 @@
+---
+source: crates/dlin/tests/integration/cli.rs
+expression: long_help(args)
+---
+Visualize dbt model lineage graph
+
+Usage: dlin graph [OPTIONS] [MODEL]...
+
+Arguments:
+  [MODEL]...
+          Model names to focus on (shows full lineage if omitted)
+
+Options:
+      --error-format <ERROR_FORMAT>
+          Error/warning output format on stderr: text (default) or json.
+          
+          When json, each diagnostic is one JSON object on its own line. Every
+          object has {"level":"error"|"warning"|"info","what":"...","why":...,"hint":...},
+          where why and hint are either strings or null. Typed diagnostics add a
+          "code" and fields of their own; for example dependency_analysis_summary
+          adds counts by reason type and namespace. Read code and the typed fields,
+          not the text of what, why and hint.
+
+          Possible values:
+          - text: Human-readable error messages (default)
+          - json: Structured JSON on stderr: {"level":"...","what":"...","why":...,"hint":...}
+          
+          [env: DLIN_ERROR_FORMAT=]
+          [default: text]
+
+  -p, --project-dir <PROJECT_DIR>
+          Path to dbt project directory
+          
+          [default: .]
+
+      --cache-dir <CACHE_DIR>
+          Directory for caching manifest analysis results (default: <project-dir>/.dlin_cache). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_CACHE_DIR=]
+
+      --verbose
+          Show the details of the model dependency analysis on stderr.
+          
+          By default, a command that builds the lineage graph prints at most one
+          configuration warning and one dependency_analysis_summary diagnostic, which
+          counts the reasons of the whole project by type and namespace. With
+          --verbose it also prints one diagnostic per reason (with the node and the
+          call site) and per skipped input, and the info diagnostics for default
+          paths that do not exist. It changes no analysis. --quiet takes precedence.
+
+      --no-cache
+          Disable the manifest analysis cache (always re-parse the manifest, results are not saved). Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_NO_CACHE=]
+
+      --refresh-cache
+          Discard the existing manifest analysis cache and rebuild it. Has no effect with --source sql, which has no cache
+          
+          [env: DLIN_REFRESH_CACHE=]
+
+  -u, --upstream <UPSTREAM>
+          Upstream levels to show (default: all)
+
+  -d, --downstream <DOWNSTREAM>
+          Downstream levels to show (default: all)
+
+  -o, --output <OUTPUT>
+          Output format: ascii (default), dot, json, mermaid, plain, svg, html
+          
+          [default: ascii]
+          [possible values: ascii, dot, json, mermaid, plain, svg, html]
+
+  -s, --select <SELECT>
+          Selector expression (comma-separated, OR logic).
+          All selectors support glob patterns (*, **, ?, []):
+          
+            tag:<pattern>     match nodes by tag
+            path:<pattern>    match by file path (prefix or glob)
+            <pattern>         match by model label
+
+      --node-type <NODE_TYPES>
+          Filter output by node type (comma-separated). Default: all types.
+          Available types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query.
+          
+          NOTE: In sql mode, generic tests are inferred from YAML declarations
+          with dlin-specific IDs. Use --source manifest for exact dependency resolution.
+
+      --no-transitive
+          Disable transitive edge completion when filters remove intermediate nodes.
+          By default, when --node-type, --select, or focus models exclude nodes,
+          edges through removed nodes are preserved as transitive edges with "(via N)" labels.
+
+      --collapse[=<MODE>]
+          Collapse intermediate nodes, replacing them with transitive edges
+          shown as "(via N)" in DOT/Mermaid output.
+          
+          Without a value (--collapse), defaults to "endpoints" mode: keeps
+          nodes with no predecessors or no successors, plus focus models.
+          
+          With --collapse=focal: keeps only source/exposure nodes and focus
+          models as endpoints. Endpoint selection ignores BFS window boundaries
+          (-u/-d), so window-edge nodes are not treated as pseudo-endpoints,
+          but traversal still respects the -u/-d limits.
+          
+          Focus models are preserved even if they would otherwise be intermediate,
+          as long as they are not removed earlier by filters like --select or
+          --node-type.
+          
+          Ignored when --no-transitive is set.
+
+          Possible values:
+          - endpoints: Keep topological endpoints (in-degree=0 or out-degree=0) and focus models
+          - focal:     Keep only source/exposure nodes and focus models (ignores BFS window boundaries)
+
+      --group-by <GROUP_BY>
+          Group nodes using subgraph/cluster blocks in supported formats (dot, mermaid).
+          
+          Supported values:
+            node-type    group by source, model, test, etc.
+            directory    group by file directory path
+
+          Possible values:
+          - node-type: Group nodes by node type (source, model, test, etc.)
+          - directory: Group nodes by their file directory
+
+      --show-columns
+          Show column names inside node labels (currently mermaid only).
+          In sql mode, columns are taken from YAML properties files when
+          available, falling back to parsing SELECT clauses.
+          In manifest mode, columns come from manifest metadata.
+          Combines well with --collapse to show rich detail on fewer nodes.
+
+      --direction <DIRECTION>
+          Graph direction for dot and mermaid output. LR = left to right (default), TB = top to bottom
+
+          Possible values:
+          - lr: Left to right (default)
+          - tb: Top to bottom
+          
+          [default: lr]
+
+      --source <SOURCE>
+          Data source for building the lineage graph.
+          
+            sql (default)   Parse SQL files directly — no dbt or Python required.
+                            Exposures and generic tests are detected from YAML with
+                            dlin-specific IDs; use manifest mode for exact test
+                            dependency resolution.
+            manifest        Use dbt manifest.json for full accuracy. Requires
+                            prior `dbt compile` (or `dbt run`/`dbt build`).
+
+          Possible values:
+          - sql:      Parse SQL files directly — no dbt/Python required. Exposures and generic tests are detected from YAML with dlin-specific IDs; use manifest mode for exact test dependency resolution
+          - manifest: Use dbt manifest.json — full accuracy, requires prior `dbt compile`
+          
+          [default: sql]
+
+      --manifest-path <MANIFEST_PATH>
+          Path to manifest.json file or directory containing target/manifest.json.
+          
+          Default: <project-dir>/target/manifest.json
+
+      --json-fields <JSON_FIELDS>
+          Select which fields to include in JSON node output (comma-separated).
+          Only the specified fields are emitted; unspecified fields are omitted.
+          
+          Available fields:
+            unique_id, label, node_type, file_path, description,
+            materialization, tags, columns, sql_content, exposure,
+            dependency_analysis
+          
+          Default (when neither --json-fields nor --json-full is given):
+            unique_id, label, node_type, file_path
+          
+          The exposure field is an object containing label, type, url, maturity,
+          and owner; it is non-null only for exposure nodes and must be explicitly
+          requested via --json-fields or --json-full.
+          
+          dependency_analysis has a status, complete or partial, and unresolved,
+          a typed reason for each part of the node's own dependencies that could
+          not be analysed. It does not say whether the project as
+          a whole was analysed; see `dlin impact --help`.
+          
+          Note: sql_content reads raw SQL files on disk in sql mode, or
+          compiled_code from manifest.json in manifest mode (requires prior
+          `dbt compile`).
+
+      --json-full
+          Shorthand for specifying all available fields in --json-fields.
+          Cannot be combined with --json-fields.
+
+  -q, --quiet
+          Suppress warning messages
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # === Full project lineage ===
+  dlin graph
+  dlin graph -o json
+
+  # === Focus on specific models (positional args = BFS from those nodes) ===
+  dlin graph orders -u 2 -d 1            # 2 upstream, 1 downstream of orders
+  dlin graph stg_orders -d 0             # just the node, no downstream
+  dlin graph stg_orders orders customers # multiple focus models
+
+  # === Filter by selector (--select/-s = keep only matching nodes) ===
+  dlin graph -s path:models/marts -o json
+  dlin graph -s 'path:**/staging/**' -o json
+  dlin graph -s 'tag:finance,path:**/staging/**' -o json   # OR logic
+  dlin graph -s 'stg_*' -o json                            # label glob
+  dlin graph -s 'tag:night*' -o json                       # tag glob
+
+  # === Combine focus + selector (intersect: BFS result AND selector match) ===
+  dlin graph orders -d 3 -s 'path:**/staging/**'  # downstream of orders, in staging/
+
+  # === Node type filter (post-filter, transitive edges preserved by default) ===
+  dlin graph orders -u 3 --node-type source,model -o json
+  dlin graph raw.orders -d 2 --node-type source,model -o json
+  dlin graph --node-type source,exposure -o mermaid  # sources feeding exposures
+  dlin graph --node-type source -o json              # list sources only
+
+  # Disable transitive edge completion
+  dlin graph --node-type model --no-transitive -o json
+
+  # === Stdin / git integration ===
+  git diff --name-only main | dlin graph -o json
+
+  # === Data source ===
+  dlin graph --source manifest --manifest-path target/manifest.json
+
+  # === JSON field control ===
+  dlin graph -o json --json-fields unique_id,label,description
+  dlin graph -o json --json-full
+
+  # === Graphviz / visual output ===
+  dlin graph -o dot | dot -Tsvg > lineage.svg
+  dlin graph -o mermaid --direction tb   # top-to-bottom layout
+
+  # === Collapse (simplify by removing intermediate nodes) ===
+  dlin graph --collapse                              # keep only graph endpoints
+  dlin graph orders --collapse                       # endpoints + orders preserved
+  dlin graph orders --collapse=focal -u 3            # sources + exposures + orders only
+
+  # === Column display (mermaid only) ===
+  dlin graph -o mermaid --show-columns               # show columns in node labels
+  dlin graph -o mermaid --collapse --show-columns    # rich detail on fewer nodes
+
+  # === Column-level analysis (requires manifest) ===
+  dlin column upstream orders                             # upstream: where do columns come from?
+  dlin column downstream stg_orders --column order_id     # downstream: what depends on this column?
