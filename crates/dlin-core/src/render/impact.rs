@@ -44,13 +44,14 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     writeln!(w)?;
 
     writeln!(w, "{}", "Summary:".bold())?;
-    writeln!(w, "  Affected models:    {}", report.affected_models)?;
-    if let Some(tests) = report.affected_tests {
-        writeln!(w, "  Affected tests:     {tests}")?;
-    } else {
-        writeln!(w, "  Affected tests:     out of scope")?;
+    for (label, count) in [
+        ("Affected models:", report.affected_models),
+        ("Affected tests:", report.affected_tests),
+        ("Affected exposures:", report.affected_exposures),
+    ] {
+        let count = count.map_or_else(|| "out of scope".to_string(), |count| count.to_string());
+        writeln!(w, "  {label:<19} {count}")?;
     }
-    writeln!(w, "  Affected exposures: {}", report.affected_exposures)?;
     writeln!(w)?;
 
     write_exploration(report, w)?;
@@ -213,9 +214,9 @@ mod tests {
         ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: Some(ImpactSeverity::Critical),
-            affected_models: 1,
+            affected_models: Some(1),
             affected_tests: Some(1),
-            affected_exposures: 1,
+            affected_exposures: Some(1),
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
                 exposure: "dashboard".to_string(),
@@ -312,9 +313,9 @@ mod tests {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "isolated".to_string(),
             overall_severity: None,
-            affected_models: 0,
+            affected_models: Some(0),
             affected_tests: Some(0),
-            affected_exposures: 0,
+            affected_exposures: Some(0),
             exposure_paths: vec![],
             exposure_paths_truncated: false,
             source_node: ImpactSource {
@@ -351,9 +352,9 @@ mod tests {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_payments".to_string(),
             overall_severity: Some(ImpactSeverity::Medium),
-            affected_models: 2,
+            affected_models: Some(2),
             affected_tests: Some(0),
-            affected_exposures: 0,
+            affected_exposures: Some(0),
             exposure_paths: vec![],
             exposure_paths_truncated: false,
             source_node: ImpactSource {
@@ -407,9 +408,9 @@ mod tests {
         let report2 = ImpactReport::from(ImpactReportParts {
             source_model: "orders".to_string(),
             overall_severity: None,
-            affected_models: 0,
+            affected_models: Some(0),
             affected_tests: Some(0),
-            affected_exposures: 0,
+            affected_exposures: Some(0),
             exposure_paths: vec![],
             exposure_paths_truncated: false,
             source_node: ImpactSource {
@@ -455,9 +456,9 @@ mod tests {
         ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: Some(ImpactSeverity::Critical),
-            affected_models: 1,
+            affected_models: Some(1),
             affected_tests: Some(1),
-            affected_exposures: 1,
+            affected_exposures: Some(1),
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
                 exposure: "dashboard".to_string(),
@@ -532,9 +533,9 @@ mod tests {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
             overall_severity: Some(ImpactSeverity::Critical),
-            affected_models: 1,
+            affected_models: Some(1),
             affected_tests: Some(0),
-            affected_exposures: 1,
+            affected_exposures: Some(1),
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
                 exposure: "dashboard".to_string(),

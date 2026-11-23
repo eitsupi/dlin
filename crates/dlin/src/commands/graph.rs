@@ -424,6 +424,13 @@ pub(crate) fn run_impact_command(
     no_cache: bool,
     refresh_cache: bool,
 ) -> Result<()> {
+    let scope = node_types
+        .map(|types| {
+            graph::impact::ImpactScope::new(types)
+                .ok_or_else(|| anyhow::anyhow!("--node-type must not be empty"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
@@ -461,12 +468,11 @@ pub(crate) fn run_impact_command(
         .filter(|m| seen.insert(m.clone()))
         .collect();
 
-    let node_types = node_types.unwrap_or_else(graph::impact::default_impact_node_types);
     let reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(dag, model)?;
-            graph::impact::compute_impact(&build, source_idx, &node_types)
+            graph::impact::compute_impact(&build, source_idx, &scope)
         })
         .collect();
 

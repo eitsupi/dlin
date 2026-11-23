@@ -472,14 +472,14 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     if args.get("node_types").is_some_and(Value::is_null) {
         anyhow::bail!("argument 'node_types' must be an array");
     }
-    let node_types = match parse_node_type_filter(args)? {
-        None => graph::impact::default_impact_node_types(),
-        Some(types) if types.is_empty() => {
-            anyhow::bail!("argument 'node_types' must not be empty");
-        }
-        Some(types) => types.into_iter().collect(),
-    };
-    let report = graph::impact::compute_impact(&state.build, idx, &node_types)
+    let scope = parse_node_type_filter(args)?
+        .map(|types| {
+            graph::impact::ImpactScope::new(types)
+                .context("argument 'node_types' must not be empty")
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let report = graph::impact::compute_impact(&state.build, idx, &scope)
         .with_context(|| format!("model not found: {model}"))?;
     let detail = column_result::Detail::parse(args)?;
     // Page through a reordered view; the report itself stays as computed.

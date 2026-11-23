@@ -2,6 +2,16 @@ use super::*;
 use crate::graph::dependency::ProjectGap;
 use std::path::PathBuf;
 
+#[test]
+fn impact_scope_requires_a_public_resource_type() {
+    assert!(ImpactScope::new([]).is_none());
+    assert!(ImpactScope::new([NodeType::Phantom]).is_none());
+    assert_eq!(
+        ImpactScope::new([NodeType::Test, NodeType::Model, NodeType::Test]),
+        ImpactScope::new([NodeType::Model, NodeType::Test])
+    );
+}
+
 /// The impact of `source_idx` in a hand-made graph with the given gaps.
 fn impact_of(
     graph: &LineageGraph,
@@ -11,7 +21,7 @@ fn impact_of(
     compute_impact(
         &GraphBuild::from_parts(graph.clone(), project_gaps.to_vec()),
         source_idx,
-        &NodeType::RESOURCE_TYPES,
+        &ImpactScope::new(NodeType::RESOURCE_TYPES).unwrap(),
     )
 }
 
@@ -149,9 +159,9 @@ fn test_compute_impact() {
     let report = impact_of(&g, stg, &[]).unwrap();
 
     assert_eq!(report.source_model, "stg_orders");
-    assert_eq!(report.affected_models, 1); // orders
+    assert_eq!(report.affected_models, Some(1)); // orders
     assert_eq!(report.affected_tests, Some(1)); // orders_positive
-    assert_eq!(report.affected_exposures, 1); // dashboard
+    assert_eq!(report.affected_exposures, Some(1)); // dashboard
     assert_eq!(report.overall_severity, Some(ImpactSeverity::Critical));
     assert_eq!(report.impacted_nodes.len(), 3);
 
@@ -174,9 +184,9 @@ fn test_compute_impact_leaf_node() {
     let report = impact_of(&g, exp, &[]).unwrap();
 
     assert_eq!(report.source_model, "dashboard");
-    assert_eq!(report.affected_models, 0);
+    assert_eq!(report.affected_models, Some(0));
     assert_eq!(report.affected_tests, Some(0));
-    assert_eq!(report.affected_exposures, 0);
+    assert_eq!(report.affected_exposures, Some(0));
     assert!(report.impacted_nodes.is_empty());
     assert!(report.exposure_paths.is_empty());
 }
@@ -193,9 +203,9 @@ fn test_impact_isolated_node() {
     let mut g = LineageGraph::new();
     let n = g.add_node(make_node("model.x", "x", NodeType::Model, None, None));
     let report = impact_of(&g, n, &[]).unwrap();
-    assert_eq!(report.affected_models, 0);
+    assert_eq!(report.affected_models, Some(0));
     assert_eq!(report.affected_tests, Some(0));
-    assert_eq!(report.affected_exposures, 0);
+    assert_eq!(report.affected_exposures, Some(0));
     assert!(report.impacted_nodes.is_empty());
 }
 
@@ -245,7 +255,7 @@ fn test_exposure_paths_multiple_exposures() {
     g.add_edge(b, exp2, EdgeData::direct(EdgeType::Exposure));
 
     let report = impact_of(&g, src, &[]).unwrap();
-    assert_eq!(report.affected_exposures, 2);
+    assert_eq!(report.affected_exposures, Some(2));
     assert_eq!(report.exposure_paths.len(), 2);
 
     // Sorted by exposure name
@@ -303,7 +313,7 @@ fn test_exposure_paths_diamond_convergent() {
     g.add_edge(c, exp, EdgeData::direct(EdgeType::Exposure));
 
     let report = impact_of(&g, src, &[]).unwrap();
-    assert_eq!(report.affected_exposures, 1);
+    assert_eq!(report.affected_exposures, Some(1));
     // Both paths should be found: src->a->c->dashboard and src->b->c->dashboard
     assert_eq!(report.exposure_paths.len(), 2);
     assert_eq!(
@@ -424,7 +434,12 @@ mod exploration {
         ));
 
         let build = GraphBuild::from_parts(graph.clone(), vec![skipped()]);
-        let report = compute_impact(&build, source, &[NodeType::Model]).unwrap();
+        let report = compute_impact(
+            &build,
+            source,
+            &ImpactScope::new([NodeType::Model]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(report.node_types(), ["model"]);
         assert_eq!(report.affected_tests, None);
         assert_eq!(report.overall_severity, None);
@@ -438,7 +453,12 @@ mod exploration {
 
         graph.add_edge(source, bridge, EdgeData::direct(EdgeType::Test));
         let build = GraphBuild::from_parts(graph, vec![]);
-        let report = compute_impact(&build, source, &[NodeType::Model]).unwrap();
+        let report = compute_impact(
+            &build,
+            source,
+            &ImpactScope::new([NodeType::Model]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(report.impacted_nodes().len(), 1);
         assert_eq!(report.impacted_nodes()[0].unique_id, "model.leaf");
         assert_eq!(report.impacted_nodes()[0].distance, 2);
@@ -587,7 +607,7 @@ mod exploration {
         let report = compute_impact(
             &GraphBuild::from_manifest(g.clone()),
             find(&g, "model.only"),
-            &NodeType::RESOURCE_TYPES,
+            &ImpactScope::new(NodeType::RESOURCE_TYPES).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -753,6 +773,14 @@ mod projects {
     use std::fs;
 
     fn impact(files: &[(&str, &str)], input: &str) -> ImpactReport {
+        impact_with_scope(
+            files,
+            input,
+            &ImpactScope::new(NodeType::RESOURCE_TYPES).unwrap(),
+        )
+    }
+
+    fn impact_with_scope(files: &[(&str, &str)], input: &str, scope: &ImpactScope) -> ImpactReport {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join("dbt_project.yml"), "name: p\n").unwrap();
         for (path, content) in files {
@@ -766,7 +794,7 @@ mod projects {
         let build =
             build_graph_report(&project_dir, &project.name, &discovered, &project.vars).unwrap();
         let idx = crate::graph::filter::try_resolve_node_quiet(build.graph(), input).unwrap();
-        compute_impact(&build, idx, &NodeType::RESOURCE_TYPES).unwrap()
+        compute_impact(&build, idx, scope).unwrap()
     }
 
     fn gap_ids(report: &ImpactReport) -> Vec<String> {
@@ -778,6 +806,42 @@ mod projects {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn isolated_model_proves_no_impact_with_a_generic_test_out_of_scope() {
+        let files = [
+            ("models/isolated.sql", "select 1 as id"),
+            ("models/validated.sql", "select 1 as id"),
+            (
+                "models/schema.yml",
+                r#"version: 2
+models:
+  - name: validated
+    columns:
+      - name: id
+        tests: [not_null]
+"#,
+            ),
+        ];
+        let report = impact_with_scope(&files, "isolated", &ImpactScope::default());
+        assert_eq!(
+            report.exploration()[0].status(),
+            ExplorationStatus::Complete
+        );
+        assert!(report.proves_no_impact());
+        assert_eq!(report.affected_tests, None);
+
+        let scope = ImpactScope::new([NodeType::Test]).unwrap();
+        let report = impact_with_scope(&files, "isolated", &scope);
+        assert_eq!(
+            report.exploration()[0].status(),
+            ExplorationStatus::Incomplete
+        );
+        assert!(!report.proves_no_impact());
+        assert_eq!(report.affected_tests, Some(0));
+        assert_eq!(report.affected_models, None);
+        assert_eq!(report.affected_exposures, None);
     }
 
     /// A generic test that reads a model only in its body is not reached

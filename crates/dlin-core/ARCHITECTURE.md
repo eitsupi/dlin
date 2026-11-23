@@ -516,7 +516,7 @@ The `model_dependency` exploration has these gaps:
   `manifest_dependencies` as a project gap even when all nodes are in R.
   `phantom_dependencies` is never a gap.
 
-`compute_impact` takes the selected resource types and a `GraphBuild`. The
+`compute_impact` takes a nonempty `ImpactScope` and a `GraphBuild`. The
 build holds the graph and project gaps together and is made by
 `build_graph_report` or
 `GraphBuild::from_manifest`, so a caller cannot judge a graph without its

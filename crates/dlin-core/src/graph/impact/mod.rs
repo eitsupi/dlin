@@ -77,9 +77,9 @@ pub struct ImpactReport {
     pub source_model: String,
     node_types: Vec<&'static str>,
     pub overall_severity: Option<ImpactSeverity>,
-    pub affected_models: usize,
+    pub affected_models: Option<usize>,
     pub affected_tests: Option<usize>,
-    pub affected_exposures: usize,
+    pub affected_exposures: Option<usize>,
     pub exposure_paths: Vec<ExposurePath>,
     /// True if any exposure had more paths than the enumeration cap
     pub exposure_paths_truncated: bool,
@@ -107,9 +107,9 @@ pub struct ImpactReport {
 pub(crate) struct ImpactReportParts {
     pub source_model: String,
     pub overall_severity: Option<ImpactSeverity>,
-    pub affected_models: usize,
+    pub affected_models: Option<usize>,
     pub affected_tests: Option<usize>,
-    pub affected_exposures: usize,
+    pub affected_exposures: Option<usize>,
     pub exposure_paths: Vec<ExposurePath>,
     pub exposure_paths_truncated: bool,
     pub impacted_nodes: Vec<ImpactedNode>,
@@ -222,12 +222,32 @@ pub fn classify_severity(node: &NodeData) -> ImpactSeverity {
     }
 }
 
-/// The default impact scope covers every public resource type except tests.
-pub fn default_impact_node_types() -> Vec<NodeType> {
-    NodeType::RESOURCE_TYPES
-        .into_iter()
-        .filter(|kind| *kind != NodeType::Test)
-        .collect()
+/// A nonempty selection of public resource types for an impact search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImpactScope(Vec<NodeType>);
+
+impl ImpactScope {
+    /// Select resource types in canonical order. Phantom nodes are internal.
+    /// Returns `None` if no public resource types were selected.
+    pub fn new(types: impl IntoIterator<Item = NodeType>) -> Option<Self> {
+        let selected: HashSet<_> = types.into_iter().collect();
+        let types: Vec<_> = NodeType::RESOURCE_TYPES
+            .into_iter()
+            .filter(|kind| selected.contains(kind))
+            .collect();
+        (!types.is_empty()).then_some(Self(types))
+    }
+}
+
+impl Default for ImpactScope {
+    fn default() -> Self {
+        Self(
+            NodeType::RESOURCE_TYPES
+                .into_iter()
+                .filter(|kind| *kind != NodeType::Test)
+                .collect(),
+        )
+    }
 }
 
 /// Compute the impact report of the node at `source_idx`, or `None` when
@@ -238,12 +258,9 @@ pub fn default_impact_node_types() -> Vec<NodeType> {
 pub fn compute_impact(
     build: &GraphBuild,
     source_idx: NodeIndex,
-    selected_types: &[NodeType],
+    scope: &ImpactScope,
 ) -> Option<ImpactReport> {
-    let node_types: Vec<_> = NodeType::RESOURCE_TYPES
-        .into_iter()
-        .filter(|kind| selected_types.contains(kind))
-        .collect();
+    let node_types = &scope.0;
     let graph = build.graph();
     let project_gaps = build.project_gaps();
     let source_node = graph.node_weight(source_idx)?;
@@ -364,7 +381,7 @@ pub fn compute_impact(
         vec![exploration::explore_model_dependencies(
             graph,
             &visited,
-            &node_types,
+            node_types,
             project_gaps,
         )]
     };
@@ -373,11 +390,15 @@ pub fn compute_impact(
         source_model,
         node_types: node_types.iter().map(NodeType::label).collect(),
         overall_severity,
-        affected_models,
+        affected_models: node_types
+            .contains(&NodeType::Model)
+            .then_some(affected_models),
         affected_tests: node_types
             .contains(&NodeType::Test)
             .then_some(affected_tests),
-        affected_exposures,
+        affected_exposures: node_types
+            .contains(&NodeType::Exposure)
+            .then_some(affected_exposures),
         exposure_paths,
         exposure_paths_truncated,
         impacted_nodes,

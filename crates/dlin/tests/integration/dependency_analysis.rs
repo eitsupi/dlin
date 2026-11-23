@@ -383,6 +383,67 @@ fn impact_excludes_generic_tests_by_default() {
 }
 
 #[test]
+fn isolated_impact_is_complete_when_only_generic_tests_are_unassessed() {
+    let tmp = small_project(&[
+        ("models/customers.sql", "select 1 as id"),
+        ("models/orders.sql", "select 1 as id"),
+        (
+            "models/schema.yml",
+            r#"version: 2
+models:
+  - name: orders
+    columns:
+      - name: id
+        tests: [not_null]
+"#,
+        ),
+    ]);
+    let output = run(tmp.path(), &["impact", "customers", "-o", "json", "-q"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report[0]["impacted_nodes"], serde_json::json!([]));
+    assert_eq!(report[0]["exploration"][0]["status"], "complete");
+    assert_eq!(report[0]["exploration"][0]["gaps"], serde_json::json!([]));
+    assert_eq!(report[0]["affected_models"], 0);
+    assert_eq!(report[0]["affected_tests"], serde_json::Value::Null);
+    assert_eq!(report[0]["affected_exposures"], 0);
+
+    let output = run(
+        tmp.path(),
+        &[
+            "impact",
+            "customers",
+            "--node-type",
+            "test",
+            "-o",
+            "json",
+            "-q",
+        ],
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report[0]["exploration"][0]["status"], "incomplete");
+    assert_eq!(report[0]["affected_models"], serde_json::Value::Null);
+    assert_eq!(report[0]["affected_tests"], 0);
+    assert_eq!(report[0]["affected_exposures"], serde_json::Value::Null);
+    assert_eq!(report[0]["exposure_paths"], serde_json::json!([]));
+
+    let output = run(
+        tmp.path(),
+        &["impact", "customers", "--node-type", "test", "-q"],
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Affected models:    out of scope"));
+    assert!(text.contains("Affected exposures: out of scope"));
+
+    let output = Command::new(binary_path())
+        .args(["impact", "customers", "--node-type", "", "-p"])
+        .arg(tmp.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--node-type"));
+}
+
+#[test]
 fn manifest_impact_traverses_edges_from_tests() {
     let tmp = tempfile::tempdir().unwrap();
     let manifest = tmp.path().join("manifest.json");

@@ -32,6 +32,8 @@ Reports downstream dependents of the selected node types and assigns severity le
 
 Text output: human-readable report with severity and distance (degree).
 JSON output: structured array of impact reports for CI/programmatic use.
+Affected counts for unselected types are null in JSON and shown as out of
+scope in text. Exposure paths are reported only when exposures are selected.
 
 Completeness:
   impacted_nodes are the selected nodes reached through the edges dlin found. They

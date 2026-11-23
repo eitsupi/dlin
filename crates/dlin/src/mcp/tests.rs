@@ -539,6 +539,21 @@ fn impact_cursors_bind_to_the_effective_node_types() {
     );
 }
 
+#[test]
+fn impact_reports_out_of_scope_counts_and_paths() {
+    let state = state();
+    let report = get_impact(
+        &json!({"model": "orders", "node_types": ["test"], "detail": "full"}),
+        &state,
+    )
+    .unwrap();
+    assert_eq!(report["affected_models"], json!(null));
+    assert_eq!(report["affected_tests"], 1);
+    assert_eq!(report["affected_exposures"], json!(null));
+    assert_eq!(report["exposure_paths"], json!([]));
+    assert_eq!(report["exposure_paths_truncated"], false);
+}
+
 /// Manifest dependencies are not assessed, so no detail level or page of an
 /// impact claims that nothing is affected. The resolved input is reported
 /// outside the page too.

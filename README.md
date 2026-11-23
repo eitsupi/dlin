@@ -398,7 +398,7 @@ dlin list --node-type source                                # sources only
 
 By default, impact reports every downstream node type except tests. A test is the end of a path in dbt: nothing can `ref()` it, so it never leads to another node. Use `--node-type` to choose the types to report, such as `--node-type model,test` or `--node-type test`; it replaces the default. MCP `get_impact` takes the same selection as a `node_types` array. Paths and distances still pass through nodes of any type.
 
-Reports include the effective `node_types`. In JSON, `affected_tests` is null when tests are outside the selection and `overall_severity` is null when no selected node was reached.
+Reports include the effective `node_types`. In JSON, each of `affected_models`, `affected_tests`, and `affected_exposures` is null when its type is outside the selection. `overall_severity` is null when no selected node was reached. Exposure paths are reported only when exposures are selected.
 
 ```sh
 $ dlin impact orders
