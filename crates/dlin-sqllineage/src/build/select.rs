@@ -21,8 +21,14 @@ use crate::{Ident, OutputName};
 impl LineageBuilder {
     /// Process a SELECT — FROM first, then projection.
     pub(crate) fn visit_select(&mut self, select: &Select) {
-        if select.value_table_mode.is_some() {
-            self.graph.value_table_scopes.insert(self.current_scope);
+        if matches!(
+            select.value_table_mode,
+            Some(
+                sqlparser::ast::ValueTableMode::AsValue
+                    | sqlparser::ast::ValueTableMode::DistinctAsValue
+            )
+        ) {
+            self.graph.as_value_scopes.insert(self.current_scope);
         }
         let input_mark = self.graph.tables.inputs.len();
         self.visit_from(&select.from);

@@ -16,7 +16,7 @@ use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
     Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, OutputRef, RangeRef, SegmentId, UnknownProvider, ValueId,
+    OutputModels, OutputRef, RangeRef, RowAliasTarget, SegmentId, UnknownProvider, ValueId,
 };
 use super::target::{StarTarget, resolve_star_target};
 use slot_eval::cut_segment;
@@ -118,6 +118,54 @@ pub(super) fn input_name_sources(
     Evaluator { cx }
         .input(lookup, name)
         .map(|(sources, has_back, transform)| (sources.relying_on(&evidence), has_back, transform))
+}
+
+/// Resolve the same bare-name binding used by STRUCT shape inference.
+pub(super) fn row_alias_sources(
+    env: BindingEnv,
+    name: &Ident,
+    binding: Option<&crate::graph::scope::Binding>,
+    cx: &mut EvalContext<'_, '_>,
+) -> Sources {
+    let mut evaluator = Evaluator { cx };
+    let (target, mut evidence) = evaluator.models().row_alias_target(env, name, binding);
+    let row_value = || {
+        Sources::one(ColumnOrigin::Unresolved(Unresolved::RowValue {
+            alias: name.clone(),
+        }))
+    };
+    let sources = match target {
+        Some(RowAliasTarget::Column(column)) => {
+            evaluator
+                .input(column, name)
+                .map_or_else(row_value, |(sources, has_back, _)| {
+                    if has_back {
+                        sources.recursive()
+                    } else {
+                        sources
+                    }
+                })
+        }
+        Some(RowAliasTarget::Row(binding)) => {
+            if let Some((fields, shape_evidence)) =
+                evaluator.models().row_range_fields(name, &binding)
+            {
+                evidence.extend(&shape_evidence);
+                let mut sources = Sources::default();
+                for field in fields {
+                    if let OutputElement::Column(slot) = field {
+                        sources.extend(evaluator.value(&slot.value).0);
+                    }
+                }
+                sources
+            } else {
+                evidence.extend(&evaluator.models().binding_schema(&binding));
+                row_value()
+            }
+        }
+        None => row_value(),
+    };
+    sources.relying_on(&evidence)
 }
 
 /// The id of the column at `index` of a published model, which the model's

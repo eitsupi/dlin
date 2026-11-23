@@ -480,9 +480,12 @@ a multi-column projection or a star is unresolved, rather than source-free.
 A STRUCT field star can expand one indexed element of a recognized array
 aggregate when the aggregate input has a known shape. A whole-row alias
 can provide that shape when its columns are enumerated and its binding is
-unambiguous. Ordinary column names take precedence at the same query level.
-An unknown column list or a value table whose element shape is unknown leaves
-the star open. An expanded field keeps its own input lineage and carries
+unambiguous. At the same query level, GoogleSQL gives the range variable
+precedence. PostgreSQL and DuckDB give the column precedence. Value lineage
+and shape inference share this binding rule. GoogleSQL value-table aliases
+denote the value itself. A known STRUCT from SELECT AS STRUCT or SELECT AS
+VALUE exposes its fields to stars and qualified references. An unknown column
+list or a value table whose element shape is unknown leaves the field star open. An expanded field keeps its own input lineage and carries
 the Aggregation transform. A dynamic index contributes to each field because
 it selects the value returned. Aggregate ordering, row filters and limits
 select or order rows and do not contribute to the field's value lineage.
@@ -690,6 +693,7 @@ proven.
 | S3 | PostgreSQL | `WITH c(b, a) AS (SELECT a, b FROM t) SELECT a FROM c` | none | `a` = `C[t.b]`, Closed. A column alias list renames by position. It does not look up the source names again |
 | S4 | BigQuery | `SELECT a, b FROM x UNION ALL BY NAME SELECT b, a FROM y` | none | `a` = `C[x.a, y.a]`, `b` = `C[x.b, y.b]`, Closed, ordinals 0 and 1 |
 | S5 | BigQuery | `WITH src AS (SELECT x, y, ts FROM t), p AS (SELECT ARRAY_AGG(r ORDER BY ts DESC LIMIT 1)[OFFSET(0)] AS item FROM src r) SELECT item.* FROM p` | none | Closed. Each field has Aggregation lineage from its matching `t` column. In particular, `x` reads only `t.x` |
+| S6 | BigQuery | `WITH v AS (SELECT AS VALUE STRUCT(a AS x) FROM t), p AS (SELECT ARRAY_AGG(r)[0] AS item FROM v r) SELECT item.* FROM p` | none | Closed. `x` reads `t.a` with Aggregation. `r` denotes the STRUCT value |
 
 ### Binding
 

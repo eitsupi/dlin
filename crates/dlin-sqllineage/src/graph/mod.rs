@@ -19,7 +19,7 @@ pub(crate) struct RawGraph {
     /// What decides the fields of an output column that may be a STRUCT. A
     /// star over the column expands these.
     pub struct_values: HashMap<NodeId, StructValue>,
-    pub value_table_scopes: HashSet<scope::ScopeId>,
+    pub as_value_scopes: HashSet<scope::ScopeId>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
     pub tables: TableLineage,
@@ -49,7 +49,7 @@ impl RawGraph {
             edges: Vec::new(),
             output_names: HashMap::new(),
             struct_values: HashMap::new(),
-            value_table_scopes: HashSet::new(),
+            as_value_scopes: HashSet::new(),
             target_columns: Vec::new(),
             empty_projection: None,
             scopes: ScopeTree::new(dialect),

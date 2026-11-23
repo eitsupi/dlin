@@ -419,7 +419,7 @@ fn struct_column_named_like_its_relation_binds_as_its_value_does() {
         Dialect::BigQuery,
     );
     assert_eq!(value, ["renamed#0 C[src.a]", "Closed"]);
-    assert_eq!(fields, ["x#0 C[src.a]", "Closed"]);
+    assert_eq!(fields, ["item#0 C[src.a] Expression", "Closed"]);
 }
 
 #[test]
@@ -594,11 +594,18 @@ fn row_alias_fields_and_a_same_named_column_use_distinct_bindings() {
         let sql = format!(
             r#"WITH p AS (SELECT t AS item FROM (SELECT x AS t, y FROM src) t) SELECT {star} FROM p"#
         );
-        let analysis = analyze_one_with(&sql, dialect, None);
-        assert!(
-            matches!(analysis.output.shape, Shape::Open { .. }),
-            "{dialect}: {sql}"
-        );
+        if dialect == Dialect::BigQuery {
+            assert_eq!(
+                render(&sql, dialect),
+                ["t#0 C[src.x]", "y#1 C[src.y]", "Closed"]
+            );
+        } else {
+            let analysis = analyze_one_with(&sql, dialect, None);
+            assert!(
+                matches!(analysis.output.shape, Shape::Open { .. }),
+                "{dialect}: {sql}"
+            );
+        }
     }
 }
 
@@ -623,14 +630,8 @@ fn aggregate_row_fields_survive_outer_join_nullability() {
         FROM other LEFT JOIN (SELECT x, y FROM src) t ON TRUE
     )
     SELECT item.* FROM p"#;
-    // An unknown competing input could publish the name t.
-    assert!(matches!(
-        analyze_one_with(sql, Dialect::BigQuery, None).output.shape,
-        Shape::Open { .. }
-    ));
-    let sql = sql.replace("FROM other LEFT", "FROM (SELECT 1 AS k) other LEFT");
     assert_eq!(
-        render(&sql, Dialect::BigQuery),
+        render(sql, Dialect::BigQuery),
         [
             "x#0 C[src.x] Aggregation",
             "y#1 C[src.y] Aggregation",
@@ -700,6 +701,92 @@ fn aggregate_row_fields_can_come_from_an_exhaustive_catalog() {
             "x#0 C[src.x] Aggregation",
             "y#1 C[src.y] Aggregation",
             "Closed"
+        ]
+    );
+}
+
+#[test]
+fn bigquery_struct_value_tables_expose_fields_through_a_cte() {
+    for projection in [
+        "SELECT AS STRUCT a AS x, b AS y FROM src",
+        "SELECT AS VALUE STRUCT(a AS x, b AS y) FROM src",
+    ] {
+        for head in [
+            "SELECT t.x, t.y FROM v t",
+            "SELECT * FROM v",
+            "SELECT t.* FROM v t",
+        ] {
+            let sql = format!(r#"WITH v AS ({projection}) {head}"#);
+            assert_eq!(
+                render(&sql, Dialect::BigQuery),
+                ["x#0 C[src.a]", "y#1 C[src.b]", "Closed"],
+                "{sql}"
+            );
+        }
+        let sql = format!(
+            r#"WITH v AS ({projection}),
+            forwarded AS (SELECT AS VALUE t FROM v t),
+            p AS (SELECT ARRAY_AGG(t)[OFFSET(0)] AS item FROM forwarded t)
+            SELECT item.* FROM p"#
+        );
+        assert_eq!(
+            render(&sql, Dialect::BigQuery),
+            [
+                "x#0 C[src.a] Aggregation",
+                "y#1 C[src.b] Aggregation",
+                "Closed"
+            ],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn shape_and_value_use_the_same_alias_precedence() {
+    let sql = r#"WITH a AS (SELECT STRUCT(col_a AS x) AS t FROM left_table),
+        b AS (SELECT col_b AS y FROM right_table),
+        p AS (SELECT ARRAY_AGG(t)[OFFSET(0)] AS item FROM a CROSS JOIN b AS t)
+        SELECT item, item.* FROM p"#;
+    assert_eq!(
+        render(sql, Dialect::BigQuery),
+        [
+            "item#0 C[right_table.col_b] Expression",
+            "y#1 C[right_table.col_b] Aggregation",
+            "Closed"
+        ]
+    );
+    assert_eq!(
+        render(
+            r#"WITH a AS (SELECT struct_pack(x := col_a) AS t FROM left_table),
+            b AS (SELECT col_b AS y FROM right_table),
+            p AS (SELECT list(t)[1] AS item FROM a CROSS JOIN b AS t)
+            SELECT item, item.* FROM p"#,
+            Dialect::DuckDb
+        ),
+        [
+            "item#0 C[left_table.col_a] Expression",
+            "x#1 C[left_table.col_a] Aggregation",
+            "Closed"
+        ]
+    );
+    let postgres = r#"WITH a AS (SELECT col_a AS t FROM left_table),
+        b AS (SELECT col_b AS y FROM right_table)
+        SELECT t FROM a CROSS JOIN b AS t"#;
+    assert_eq!(
+        render(postgres, Dialect::PostgreSql),
+        ["t#0 C[left_table.col_a]", "Closed"]
+    );
+}
+
+#[test]
+fn as_value_subquery_reads_the_unexpanded_value_in_scalar_context() {
+    let sql = r#"SELECT (SELECT AS VALUE STRUCT(a AS x, b AS y) FROM src) AS item"#;
+    let analysis = analyze_one_with(sql, Dialect::BigQuery, None);
+    assert_eq!(
+        common::concrete_sources(&analysis.output.columns[0]),
+        [
+            ("src".to_owned(), "a".to_owned()),
+            ("src".to_owned(), "b".to_owned())
         ]
     );
 }

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use super::super::binding::{ReferenceTarget, ambiguous_qualified_origin, reference_target};
 use super::super::target::{StarTarget, resolve_star_target};
 use super::choose::Choice;
-use super::input::{InputLookup, InputModel, Invalidity};
+use super::input::{InputLookup, InputModel, Invalidity, RowAliasTarget};
 use super::options::apply_options;
 use super::slot::{SegmentDef, SlotArena, SlotDef};
 use super::{
@@ -322,6 +322,30 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 elements
             }
         };
+        let mut opaque_value_table = source
+            .as_ref()
+            .is_some_and(|(_, model)| model.opaque_value_table)
+            || set_operation_source
+                .as_ref()
+                .and_then(|(_, _, _, _, right)| right.as_ref())
+                .is_some_and(|model| model.opaque_value_table);
+        if graph.as_value_scopes.contains(&scope)
+            && let [OutputElement::Column(value)] = elements.as_mut_slice()
+        {
+            if let Some(fields) = field_elements(
+                self.struct_fields(&value.value, &mut ShapeWalk::default()),
+                &mut schema,
+            ) {
+                elements = fields;
+                reads.clear();
+                invalid.clear();
+                skip_forward_check = true;
+            } else {
+                value.name = Ident::unquoted("");
+                value.output_name = OutputName::Anonymous;
+                opaque_value_table = true;
+            }
+        }
         // Only the output plan is followed, so a flagged operand shows up here
         // while an unrelated nested query does not.
         if graph.scopes.has_unknown_output_width(scope)
@@ -368,6 +392,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         }
         let forwarded = self.publish(scope, publication, &mut elements);
         let mut model = OutputModel::new(elements, reasons, graph.dialect);
+        model.opaque_value_table = opaque_value_table;
         model.invalid = invalid;
         model.reads = reads;
         model.schema = schema;
@@ -586,60 +611,39 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             ReferenceTarget::Unqualified { name, env } => {
                 self.column_struct_fields(env, std::slice::from_ref(name), walk)
             }
-            ReferenceTarget::RowValueCandidate {
-                name,
-                env,
-                binding: Some(binding),
-            } => {
-                if graph
-                    .scopes
-                    .ambiguous_binding_candidates(env, name)
-                    .is_some()
-                {
-                    return None;
-                }
-                self.row_candidate_fields(name, env, &binding, walk)
+            ReferenceTarget::RowValueCandidate { name, env, binding } => {
+                let (target, mut evidence) = self.row_alias_target(env, name, binding);
+                let (fields, inner) = match target? {
+                    RowAliasTarget::Column(InputLookup::Column { value, .. }) => {
+                        self.struct_fields(&value, walk)
+                    }
+                    RowAliasTarget::Column(InputLookup::Scope { scope, .. }) => self
+                        .binding_struct_fields(
+                            &Binding::Cte(scope),
+                            std::slice::from_ref(name),
+                            walk,
+                        ),
+                    RowAliasTarget::Column(_) => None,
+                    RowAliasTarget::Row(binding) => self.row_range_fields(name, &binding),
+                }?;
+                evidence.extend(&inner);
+                Some((fields, evidence))
             }
-            ReferenceTarget::RowValueCandidate { .. }
-            | ReferenceTarget::Unbound { .. }
-            | ReferenceTarget::None => None,
+            ReferenceTarget::Unbound { .. } | ReferenceTarget::None => None,
         }
     }
 
-    /// A column with the alias's name takes precedence over the whole row.
-    /// Require enough schema knowledge to distinguish those bindings.
-    fn row_candidate_fields(
+    pub(in crate::resolve) fn row_range_fields(
         &mut self,
         name: &Ident,
-        env: BindingEnv,
         binding: &Binding,
-        walk: &mut ShapeWalk,
     ) -> Option<(Vec<OutputElement>, Evidence)> {
-        let (column, mut evidence) = self.row_alias_column(env, name)?;
-        if let Some(column) = column {
-            let value = match column {
-                InputLookup::Column { value, .. } => value,
-                InputLookup::Scope { scope, .. } if !self.is_value_table(scope) => {
-                    let model = self.scope(scope);
-                    let Choice::Column(_, slot) = model.choose(name) else {
-                        return None;
-                    };
-                    slot.value.clone()
-                }
-                _ => return None,
-            };
-            let (fields, inner) = self.struct_fields(&value, walk)?;
-            evidence.extend(&inner);
-            return Some((fields, evidence));
+        if let Binding::Cte(scope) | Binding::DerivedTable(scope) = binding
+            && self.scope(*scope).opaque_value_table
+        {
+            return None;
         }
-
-        match binding {
-            Binding::Cte(scope) | Binding::DerivedTable(scope) if self.is_value_table(*scope) => {
-                return None;
-            }
-            Binding::VirtualSource(_) => return None,
-            _ => {}
-        }
+        let mut evidence = Evidence::default();
         evidence.extend(&self.binding_schema(binding));
         let range = RangeRef {
             index: 0,
@@ -667,26 +671,6 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
             }
         }
         Some((fields, evidence))
-    }
-
-    /// A value-table range variable denotes the value itself, not a new row.
-    fn is_value_table(&self, scope: ScopeId) -> bool {
-        let mut pending = vec![scope];
-        let mut seen = HashSet::new();
-        while let Some(scope) = pending.pop() {
-            if !seen.insert(scope) {
-                continue;
-            }
-            if self.graph.value_table_scopes.contains(&scope) {
-                return true;
-            }
-            match self.graph.scopes.output_plan(scope) {
-                OutputPlan::Delegate(child) => pending.push(*child),
-                OutputPlan::SetOperation { left, right, .. } => pending.extend([*left, *right]),
-                OutputPlan::Projection => {}
-            }
-        }
-        false
     }
 
     /// The fields of a value that is a STRUCT whose fields are known, as
@@ -762,7 +746,7 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
 
     /// The schemas that decide what a binding publishes: a physical
     /// relation's own, or those of the CTE or derived table it reads.
-    pub(super) fn binding_schema(&mut self, binding: &Binding) -> Evidence {
+    pub(in crate::resolve) fn binding_schema(&mut self, binding: &Binding) -> Evidence {
         match binding {
             Binding::Table(table) => Evidence::relation(table),
             Binding::Cte(child) | Binding::DerivedTable(child) => self.scope(*child).schema.clone(),

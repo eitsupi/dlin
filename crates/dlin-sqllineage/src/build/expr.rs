@@ -66,6 +66,11 @@ impl LineageBuilder {
         ) {
             return vec![self.graph.add_unsupported("subquery value output")];
         }
+        if self.graph.as_value_scopes.contains(&scope) {
+            // A scalar subquery reads the entire value, even when a FROM
+            // reader would expand that value's STRUCT fields.
+            return vec![column.node_id];
+        }
         let name = column.name.clone();
         vec![self.graph.add_ref_with_binding(
             name,
