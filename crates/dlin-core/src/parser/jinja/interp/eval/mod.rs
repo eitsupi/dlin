@@ -16,8 +16,8 @@ use super::ir::{Arg, BinOp, Call, Expr, ExprKind, SourceId, Span, Stmt, Target, 
 use super::known;
 use super::library::MacroLibrary;
 use super::value::{
-    AValue, Builtin, Causes, Closure, ContextObject, HeapId, HeapObj, MacroRef, Output, Reason,
-    Scope, State, merge_states, merge_value, path_difference,
+    AValue, Builtin, Causes, Closure, ContextObject, Heap, HeapId, HeapObj, MacroRef, Output,
+    Reason, Scope, State, merge_states, merge_value, path_difference,
 };
 use crate::graph::dependency::{
     AnalysisLimit, DependencyFunction, DependencyReason, ExtractionSite, RuntimeValueSource,
@@ -356,7 +356,8 @@ fn widen(entry: &State, state: State, causes: &Causes) -> State {
     for id in ids {
         let changed = match (entry.heap.get(&id), state.heap.get(&id)) {
             (Some(before), Some(after)) => {
-                !matches!((before, after), (HeapObj::Clobbered(a), HeapObj::Clobbered(b)) if a == b)
+                !entry.heap.shares(&state.heap, &id)
+                    && !matches!((before, after), (HeapObj::Clobbered(a), HeapObj::Clobbered(b)) if a == b)
                     && format!("{before:?}") != format!("{after:?}")
             }
             _ => true,

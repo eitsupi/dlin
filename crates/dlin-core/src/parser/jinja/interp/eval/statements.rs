@@ -9,7 +9,7 @@ impl<'a> Interp<'a> {
         self.template = Some(body);
         let state = State::new(
             vec![Scope::new()],
-            BTreeMap::new(),
+            Heap::default(),
             Output::Discard,
             Causes::default(),
         );

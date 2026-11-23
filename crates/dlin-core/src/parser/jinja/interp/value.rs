@@ -255,23 +255,59 @@ impl Output {
     }
 }
 
+/// The containers of a state. The states of different paths share a
+/// container until one of them changes it, so that copying a state does not
+/// copy every container.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Heap(BTreeMap<HeapId, Arc<HeapObj>>);
+
+impl Heap {
+    pub(crate) fn get(&self, id: &HeapId) -> Option<&HeapObj> {
+        self.0.get(id).map(Arc::as_ref)
+    }
+
+    /// The container to change, copied first if another state shares it.
+    pub(crate) fn get_mut(&mut self, id: &HeapId) -> Option<&mut HeapObj> {
+        self.0.get_mut(id).map(Arc::make_mut)
+    }
+
+    pub(crate) fn insert(&mut self, id: HeapId, obj: HeapObj) {
+        self.0.insert(id, Arc::new(obj));
+    }
+
+    pub(crate) fn remove(&mut self, id: &HeapId) {
+        self.0.remove(id);
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &HeapId> {
+        self.0.keys()
+    }
+
+    /// Whether both heaps hold the same shared container at `id`, which
+    /// then has not changed in either.
+    pub(crate) fn shares(&self, other: &Heap, id: &HeapId) -> bool {
+        matches!((self.0.get(id), other.0.get(id)), (Some(a), Some(b)) if Arc::ptr_eq(a, b))
+    }
+}
+
+/// Whether two containers are the same, without comparing the contents of
+/// one that both states share.
+fn same_obj(a: &Arc<HeapObj>, b: &Arc<HeapObj>) -> bool {
+    Arc::ptr_eq(a, b) || a.same(b)
+}
+
 /// The state of one frame on one execution path.
 #[derive(Debug, Clone)]
 pub(crate) struct State {
     pub(crate) scopes: Vec<Scope>,
-    pub(crate) heap: BTreeMap<HeapId, HeapObj>,
+    pub(crate) heap: Heap,
     pub(crate) out: Output,
     /// Reasons of the unknown conditions this path depends on.
     pub(crate) path: Causes,
 }
 
 impl State {
-    pub(crate) fn new(
-        scopes: Vec<Scope>,
-        heap: BTreeMap<HeapId, HeapObj>,
-        out: Output,
-        path: Causes,
-    ) -> Self {
+    pub(crate) fn new(scopes: Vec<Scope>, heap: Heap, out: Output, path: Causes) -> Self {
         Self {
             scopes,
             heap,
@@ -288,7 +324,7 @@ impl State {
             self,
             State::new(
                 Vec::new(),
-                BTreeMap::new(),
+                Heap::default(),
                 Output::Discard,
                 Causes::default(),
             ),
@@ -315,12 +351,13 @@ impl State {
                         .zip(b)
                         .all(|((ka, va), (kb, vb))| ka == kb && va.same(vb))
             })
-            && self.heap.len() == other.heap.len()
+            && self.heap.0.len() == other.heap.0.len()
             && self
                 .heap
+                .0
                 .iter()
-                .zip(&other.heap)
-                .all(|((ia, a), (ib, b))| ia == ib && a.same(b))
+                .zip(&other.heap.0)
+                .all(|((ia, a), (ib, b))| ia == ib && same_obj(a, b))
     }
 
     /// Make every container reachable from `values` unknown, because an
@@ -404,10 +441,8 @@ fn unexplained_merge() -> Causes {
     )
 }
 
+/// Merge two containers that differ.
 fn merge_heap_obj(a: &HeapObj, b: &HeapObj, causes: &Causes) -> HeapObj {
-    if a.same(b) {
-        return a.clone();
-    }
     match (a, b) {
         (HeapObj::List(x), HeapObj::List(y)) if x.len() == y.len() => HeapObj::List(
             x.iter()
@@ -474,17 +509,19 @@ pub(crate) fn merge_states(a: State, b: State, fallback: &Causes) -> State {
         })
         .collect();
     let ids: BTreeSet<HeapId> = a.heap.keys().chain(b.heap.keys()).copied().collect();
-    let heap = ids
-        .into_iter()
-        .map(|id| {
-            let obj = match (a.heap.get(&id), b.heap.get(&id)) {
-                (Some(x), Some(y)) => merge_heap_obj(x, y, &causes),
-                (Some(x), None) | (None, Some(x)) => x.clone(),
-                (None, None) => unreachable!(),
-            };
-            (id, obj)
-        })
-        .collect();
+    let heap = Heap(
+        ids.into_iter()
+            .map(|id| {
+                let obj = match (a.heap.0.get(&id), b.heap.0.get(&id)) {
+                    (Some(x), Some(y)) if same_obj(x, y) => x.clone(),
+                    (Some(x), Some(y)) => Arc::new(merge_heap_obj(x, y, &causes)),
+                    (Some(x), None) | (None, Some(x)) => x.clone(),
+                    (None, None) => unreachable!(),
+                };
+                (id, obj)
+            })
+            .collect(),
+    );
     let out = match (&a.out, &b.out) {
         (x, y) if x.same(y) => a.out.clone(),
         (Output::Discard, _) | (_, Output::Discard) => Output::Discard,
