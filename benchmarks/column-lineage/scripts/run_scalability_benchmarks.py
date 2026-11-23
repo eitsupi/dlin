@@ -278,7 +278,12 @@ def probe_not_benchmarked(name: str, tool: str, kind: str, argv: list[str], reas
     stdout = benchmark_dir / f"{name}.probe.stdout"
     stderr = benchmark_dir / f"{name}.probe.stderr"
     exit_code = run_capture(argv, ROOT, timeout, stdout, stderr)
-    records.append({"name": name, "tool": tool, "kind": kind, "command": command_string(argv), "status": "not_benchmarked", "exit_code": exit_code, "reason": reason, "probe_stdout": rel(stdout), "probe_stderr": rel(stderr), "raw_stdout": None, "raw_stderr": None, "hyperfine_json": None})
+    if exit_code == 0:
+        status = "not_benchmarked"
+    else:
+        status = "invalid"
+        reason = f"timeout after {timeout} seconds" if exit_code == 124 else "command failed"
+    records.append({"name": name, "tool": tool, "kind": kind, "command": command_string(argv), "status": status, "exit_code": exit_code, "reason": reason, "probe_stdout": rel(stdout), "probe_stderr": rel(stderr), "raw_stdout": None, "raw_stderr": None, "hyperfine_json": None})
 
 
 def record_unsupported(name: str, tool: str, kind: str, reason: str, records: list[dict]) -> None:
