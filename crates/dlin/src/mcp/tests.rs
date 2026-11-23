@@ -141,16 +141,7 @@ fn column_lineage_tool_states_the_known_limitations() {
         .into_iter()
         .find(|tool| tool["name"] == "get_column_lineage")
         .unwrap();
-    let description = tool["description"].as_str().unwrap();
-    for limitation in [
-        "Only value dependencies",
-        "filters and join conditions",
-        "inputs of sibling fields",
-        "treated as exhaustive",
-        "Partial results may omit sources",
-    ] {
-        assert!(description.contains(limitation), "lacks {limitation:?}");
-    }
+    insta::assert_snapshot!(tool["description"].as_str().unwrap(), @"Trace a column upstream or downstream using compiled SQL. Only value dependencies are traced; columns used only in filters and join conditions are not. A STRUCT field can be traced to the inputs of the whole STRUCT, for example across model boundaries, so a complete result can include the inputs of sibling fields. A YAML column list used as a schema is treated as exhaustive. Partial results may omit sources. Possible impacts are unconfirmed, and incomplete exploration may miss targets.");
 }
 
 #[test]
