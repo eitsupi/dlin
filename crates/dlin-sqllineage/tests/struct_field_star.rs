@@ -780,13 +780,103 @@ fn shape_and_value_use_the_same_alias_precedence() {
 
 #[test]
 fn as_value_subquery_reads_the_unexpanded_value_in_scalar_context() {
-    let sql = r#"SELECT (SELECT AS VALUE STRUCT(a AS x, b AS y) FROM src) AS item"#;
-    let analysis = analyze_one_with(sql, Dialect::BigQuery, None);
-    assert_eq!(
-        common::concrete_sources(&analysis.output.columns[0]),
-        [
-            ("src".to_owned(), "a".to_owned()),
-            ("src".to_owned(), "b".to_owned())
-        ]
+    for sql in [
+        r#"SELECT (SELECT AS VALUE STRUCT(a AS x, b AS y) FROM src LIMIT 1) AS item"#,
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q LIMIT 1) AS item"#,
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            SELECT AS VALUE STRUCT(a AS x, b AS y) AS y FROM q LIMIT 1) AS item"#,
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            SELECT AS VALUE STRUCT(a AS x, b AS y) AS z FROM q LIMIT 1) AS item"#,
+        r#"SELECT (WITH unused AS (SELECT AS VALUE STRUCT(c AS x) FROM decoy)
+            SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM src LIMIT 1) AS item"#,
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            (WITH r AS (SELECT a, b FROM q)
+                SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM r LIMIT 1)) AS item"#,
+    ] {
+        common::expect_rendered_in(
+            sql,
+            Dialect::BigQuery,
+            &["item#0 C[src.a, src.b] Expression", "Closed"],
+        );
+    }
+}
+
+#[test]
+fn as_value_with_is_read_by_array_and_in_but_not_exists() {
+    for (sql, expected) in [
+        (
+            r#"SELECT ARRAY(WITH q AS (SELECT a, b FROM src)
+                SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q) AS item"#,
+            "item#0 C[src.a, src.b] Expression",
+        ),
+        (
+            r#"SELECT STRUCT(1 AS x, 2 AS y) IN (WITH q AS (SELECT a, b FROM src)
+                SELECT AS VALUE STRUCT(a AS x, b AS y) AS y FROM q) AS item"#,
+            "item#0 C[src.a, src.b] Expression",
+        ),
+        (
+            r#"SELECT EXISTS(WITH q AS (SELECT a, b FROM src)
+                SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q) AS item"#,
+            "item#0 C[] Expression",
+        ),
+    ] {
+        common::expect_rendered_in(sql, Dialect::BigQuery, &[expected, "Closed"]);
+    }
+}
+
+#[test]
+fn value_table_set_operands_are_unsupported_in_expression_subqueries() {
+    for sql in [
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            (SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q)
+            UNION ALL
+            (WITH r AS (SELECT c, d FROM other_src)
+                SELECT AS VALUE STRUCT(c AS x, d AS y) AS x FROM r)
+            LIMIT 1) AS item"#,
+        r#"SELECT (SELECT STRUCT(a AS x, b AS y) AS x FROM src
+            UNION ALL
+            SELECT AS VALUE STRUCT(c AS x, d AS y) AS x FROM other_src
+            LIMIT 1) AS item"#,
+    ] {
+        common::expect_rendered_in(
+            sql,
+            Dialect::BigQuery,
+            &[
+                r#"item#0 P[ | Unsupported { what: "subquery value table set operation" }] Expression"#,
+                "Closed",
+            ],
+        );
+    }
+
+    common::expect_rendered_in(
+        r#"SELECT (WITH unused AS (SELECT AS VALUE STRUCT(c AS x) FROM decoy)
+            SELECT a AS x FROM src UNION ALL SELECT b AS x FROM other_src
+            LIMIT 1) AS item"#,
+        Dialect::BigQuery,
+        &["item#0 C[other_src.b, src.a] Expression", "Closed"],
+    );
+}
+
+#[test]
+fn as_value_with_still_exposes_fields_to_from_readers() {
+    common::expect_rendered_in(
+        r#"SELECT v.x, v.* FROM (WITH q AS (SELECT a, b FROM src)
+            SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q) AS v"#,
+        Dialect::BigQuery,
+        &["x#0 C[src.a]", "x#1 C[src.a]", "y#2 C[src.b]", "Closed"],
+    );
+}
+
+#[test]
+fn as_struct_with_multiple_projections_is_unsupported_in_scalar_context() {
+    common::expect_rendered_in(
+        r#"SELECT (WITH q AS (SELECT a, b FROM src)
+            SELECT AS STRUCT a AS x, b AS y FROM q LIMIT 1) AS item"#,
+        Dialect::BigQuery,
+        &[
+            r#"item#0 P[ | Unsupported { what: "subquery value output" }] Expression"#,
+            "Closed",
+        ],
     );
 }

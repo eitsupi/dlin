@@ -588,3 +588,68 @@ fn test_column_upstream_errors_on_whitespace_only_adapter_type() {
         stderr
     );
 }
+
+#[test]
+fn as_value_with_keeps_both_sources_across_a_model_boundary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("manifest.json");
+    fs::write(
+        &manifest_path,
+        r#"{
+  "metadata": {"adapter_type": "bigquery", "project_name": "test_project"},
+  "nodes": {
+    "model.test_project.stg_items": {
+      "unique_id": "model.test_project.stg_items",
+      "name": "stg_items",
+      "resource_type": "model",
+      "depends_on": {"nodes": []},
+      "config": {"materialized": "view", "tags": []},
+      "compiled_code": "SELECT (WITH q AS (SELECT a, b FROM raw.src) SELECT AS VALUE STRUCT(a AS x, b AS y) AS x FROM q LIMIT 1) AS item"
+    },
+    "model.test_project.items": {
+      "unique_id": "model.test_project.items",
+      "name": "items",
+      "resource_type": "model",
+      "depends_on": {"nodes": ["model.test_project.stg_items"]},
+      "config": {"materialized": "view", "tags": []},
+      "compiled_code": "SELECT item FROM stg_items"
+    }
+  },
+  "sources": {},
+  "exposures": {}
+}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(binary_path())
+        .args(["column", "upstream", "items", "-o", "json", "--no-cache"])
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .current_dir(tmp.path())
+        .output()
+        .expect("failed to run dlin");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let columns = reports[0]["output"]["columns"].as_array().unwrap();
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0]["name"]["ident"]["value"], "item");
+    assert_eq!(columns[0]["transformation"], "direct");
+    let lineage = &columns[0]["lineage"];
+    assert_eq!(lineage["status"], "complete");
+    let known = lineage["known"].as_array().unwrap();
+    assert_eq!(known.len(), 2);
+    for (source, column) in known.iter().zip(["a", "b"]) {
+        assert_eq!(source["table"], "raw.src");
+        assert_eq!(source["column"]["value"], column);
+        let path = source["model_path"].as_array().unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0]["output"]["model"], "stg_items");
+        assert_eq!(path[0]["output"]["column"], "item");
+        assert_eq!(path[0]["transformation"], "expression");
+    }
+}

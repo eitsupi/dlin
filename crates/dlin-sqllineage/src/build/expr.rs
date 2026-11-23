@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use sqlparser::ast::{self, AccessExpr, Expr, FunctionArguments, Subscript};
 
 use crate::Ident;
@@ -5,7 +7,7 @@ use crate::build::LineageBuilder;
 use crate::build::function_semantics;
 use crate::graph::edge::EdgeKind;
 use crate::graph::node::NodeId;
-use crate::graph::scope::{Binding, ScopeKind};
+use crate::graph::scope::{Binding, OutputPlan, ScopeId, ScopeKind};
 use crate::types::TableRef;
 
 impl LineageBuilder {
@@ -56,8 +58,33 @@ impl LineageBuilder {
 
     /// The value a subquery scope gives when used as a scalar: its single
     /// projected column, or an unsupported input for any other shape.
-    fn subquery_value_inputs(&mut self, scope: crate::graph::scope::ScopeId) -> Vec<NodeId> {
-        let [column] = self.graph.scopes.output_columns(scope) else {
+    fn subquery_value_inputs(&mut self, scope: ScopeId) -> Vec<NodeId> {
+        let mut result_scope = scope;
+        let mut seen = HashSet::new();
+        while let OutputPlan::Delegate(child) = self.graph.scopes.output_plan(result_scope) {
+            if !seen.insert(result_scope) {
+                return vec![
+                    self.graph
+                        .add_unsupported("cyclic subquery output delegation"),
+                ];
+            }
+            result_scope = *child;
+        }
+
+        // The set-operation model merges FROM-visible columns, which may be
+        // the fields of a value table. It cannot supply the whole value here.
+        if matches!(
+            self.graph.scopes.output_plan(result_scope),
+            OutputPlan::SetOperation { .. }
+        ) && self.has_as_value_operand(result_scope)
+        {
+            return vec![
+                self.graph
+                    .add_unsupported("subquery value table set operation"),
+            ];
+        }
+
+        let [column] = self.graph.scopes.output_columns(result_scope) else {
             return vec![self.graph.add_unsupported("subquery value output")];
         };
         if !matches!(
@@ -66,7 +93,7 @@ impl LineageBuilder {
         ) {
             return vec![self.graph.add_unsupported("subquery value output")];
         }
-        if self.graph.as_value_scopes.contains(&scope) {
+        if self.graph.as_value_scopes.contains(&result_scope) {
             // A scalar subquery reads the entire value, even when a FROM
             // reader would expand that value's STRUCT fields.
             return vec![column.node_id];
@@ -78,6 +105,26 @@ impl LineageBuilder {
             self.env(),
             Some(Binding::DerivedTable(scope)),
         )]
+    }
+
+    /// Inspect only the plans that produce the set operation's output.
+    fn has_as_value_operand(&self, scope: ScopeId) -> bool {
+        let mut pending = vec![scope];
+        let mut seen = HashSet::new();
+        while let Some(scope) = pending.pop() {
+            if !seen.insert(scope) {
+                continue;
+            }
+            match self.graph.scopes.output_plan(scope) {
+                OutputPlan::Projection if self.graph.as_value_scopes.contains(&scope) => {
+                    return true;
+                }
+                OutputPlan::Projection => {}
+                OutputPlan::Delegate(child) => pending.push(*child),
+                OutputPlan::SetOperation { left, right, .. } => pending.extend([*left, *right]),
+            }
+        }
+        false
     }
 
     pub(crate) fn collect_ancestors(&mut self, expr: &Expr) -> Vec<NodeId> {
@@ -719,4 +766,34 @@ fn is_aggregate(name: &str) -> bool {
             | "VARIANCE"
             | "MEDIAN"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::node::RawNode;
+
+    #[test]
+    fn cyclic_subquery_output_delegation_is_unsupported() {
+        let mut builder = LineageBuilder::new(crate::Dialect::BigQuery);
+        let scope = builder.push_scope(ScopeKind::Subquery);
+        let body = builder.push_scope(ScopeKind::Body);
+        builder
+            .graph
+            .scopes
+            .set_output_plan(scope, OutputPlan::Delegate(body));
+        builder
+            .graph
+            .scopes
+            .set_output_plan(body, OutputPlan::Delegate(scope));
+
+        let inputs = builder.subquery_value_inputs(scope);
+        assert!(matches!(
+            inputs.as_slice(),
+            [node] if matches!(
+                builder.graph.nodes[*node],
+                RawNode::Unsupported { what: "cyclic subquery output delegation" }
+            )
+        ));
+    }
 }
