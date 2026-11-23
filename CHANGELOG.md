@@ -5,6 +5,7 @@
 ### Bug Fixes
 
 - Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT.
+- Trace named STRUCT field references to the selected field when its binding and shape are known.
 
 ## [0.3.0-rc.1] - 2026-11-23
 

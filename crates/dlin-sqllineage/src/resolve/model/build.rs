@@ -68,6 +68,12 @@ pub(in crate::resolve) struct OutputModels<'a, 'c, 's> {
     pub(super) store: &'s mut ModelStore,
 }
 
+pub(in crate::resolve) enum FieldLookup {
+    Found(ValueId, Evidence),
+    Missing(Ident, Evidence),
+    Unknown,
+}
+
 impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     pub(in crate::resolve) fn new(
         graph: &'a RawGraph,
@@ -673,6 +679,52 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
         Some((fields, evidence))
     }
 
+    pub(in crate::resolve) fn field_value(&mut self, reference: NodeId) -> FieldLookup {
+        self.lookup_field_path(reference, &mut ShapeWalk::default())
+    }
+
+    fn lookup_field_path(&mut self, reference: NodeId, walk: &mut ShapeWalk) -> FieldLookup {
+        let graph = self.graph;
+        let Some(path) = graph.field_paths.get(&reference) else {
+            return FieldLookup::Unknown;
+        };
+        let Some((mut fields, mut evidence)) = self.reference_struct_fields(reference, walk) else {
+            return FieldLookup::Unknown;
+        };
+        let mut path = path.iter().peekable();
+        while let Some(name) = path.next() {
+            if fields
+                .iter()
+                .any(|field| matches!(field, OutputElement::Unknown(_)))
+            {
+                return FieldLookup::Unknown;
+            }
+            let key = name.column_key(graph.dialect);
+            let mut matching = fields.into_iter().filter_map(|field| match field {
+                OutputElement::Column(slot) if slot.name.column_key(graph.dialect) == key => {
+                    Some(slot)
+                }
+                _ => None,
+            });
+            let Some(slot) = matching.next() else {
+                return FieldLookup::Missing(name.clone(), evidence);
+            };
+            if matching.next().is_some() {
+                return FieldLookup::Unknown;
+            }
+            evidence.extend(&slot.structure);
+            if path.peek().is_none() {
+                return FieldLookup::Found(slot.value, evidence);
+            }
+            let Some((nested, inner_evidence)) = self.struct_fields(&slot.value, walk) else {
+                return FieldLookup::Unknown;
+            };
+            fields = nested;
+            evidence.extend(&inner_evidence);
+        }
+        FieldLookup::Unknown
+    }
+
     /// The fields of a value that is a STRUCT whose fields are known, as
     /// columns defined by the star that expands them, with the schemas that
     /// decide them. A forwarded column, and a column a projection reads as it
@@ -693,6 +745,11 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                 ValueId::Forward(id) if walk.slots.insert(id) => {
                     value = self.store.arena.slot(id).value.clone();
                 }
+                ValueId::AggregateElement { field, index } => {
+                    let (mut fields, evidence) = self.struct_fields(&field, walk)?;
+                    wrap_aggregate_fields(&mut fields, &index);
+                    return Some((fields, evidence));
+                }
                 _ => return None,
             }
         };
@@ -706,20 +763,22 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
     ) -> Option<(Vec<OutputElement>, Evidence)> {
         let fields = match shape {
             StructValue::Fields(fields) => fields,
+            StructValue::Column(reference) if self.graph.field_paths.contains_key(reference) => {
+                let FieldLookup::Found(value, mut evidence) =
+                    self.lookup_field_path(*reference, walk)
+                else {
+                    return None;
+                };
+                let (fields, inner) = self.struct_fields(&value, walk)?;
+                evidence.extend(&inner);
+                return Some((fields, evidence));
+            }
             StructValue::Column(reference) => {
                 return self.reference_struct_fields(*reference, walk);
             }
             StructValue::AggregateElement { input, index } => {
                 let (mut fields, evidence) = self.shape_fields(input, walk)?;
-                let index: Rc<[NodeId]> = Rc::from(index.as_slice());
-                for field in &mut fields {
-                    if let OutputElement::Column(slot) = field {
-                        slot.value = ValueId::AggregateElement {
-                            field: Box::new(slot.value.clone()),
-                            index: index.clone(),
-                        };
-                    }
-                }
+                wrap_aggregate_fields(&mut fields, &Rc::from(index.as_slice()));
                 return Some((fields, evidence));
             }
         };
@@ -1369,6 +1428,17 @@ pub(super) fn forward_scope(
 struct ShapeWalk {
     nodes: HashSet<NodeId>,
     slots: HashSet<super::SlotId>,
+}
+
+fn wrap_aggregate_fields(fields: &mut [OutputElement], index: &Rc<[NodeId]>) {
+    for field in fields {
+        if let OutputElement::Column(slot) = field {
+            slot.value = ValueId::AggregateElement {
+                field: Box::new(slot.value.clone()),
+                index: index.clone(),
+            };
+        }
+    }
 }
 
 /// The columns of the fields a star expands, each established by the schemas

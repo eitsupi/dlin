@@ -880,3 +880,151 @@ fn as_struct_with_multiple_projections_is_unsupported_in_scalar_context() {
         ],
     );
 }
+
+#[test]
+fn named_struct_fields_match_their_star_expansion_across_dialects() {
+    for (dialect, constructor) in [
+        (Dialect::BigQuery, "STRUCT(a AS x, b AS y)"),
+        (Dialect::Databricks, "named_struct('x', a, 'y', b)"),
+        (Dialect::Spark, "named_struct('x', a, 'y', b)"),
+        (Dialect::DuckDb, "struct_pack(x := a, y := b)"),
+    ] {
+        let sql = format!(
+            "WITH q AS (SELECT {constructor} AS s FROM src),
+                expanded AS (SELECT s.* FROM q)
+            SELECT q.s.x AS direct, expanded.x AS expanded
+            FROM q CROSS JOIN expanded"
+        );
+        common::expect_rendered_in(
+            &sql,
+            dialect,
+            &["direct#0 C[src.a]", "expanded#1 C[src.a]", "Closed"],
+        );
+    }
+    common::expect_rendered_in(
+        "WITH q AS (SELECT STRUCT(a AS x, b AS y) AS s FROM src) SELECT s.x AS x FROM q",
+        Dialect::BigQuery,
+        &["x#0 C[src.a]", "Closed"],
+    );
+}
+
+#[test]
+fn named_struct_fields_resolve_nested_paths_and_forwarded_values() {
+    common::expect_rendered_in(
+        r#"WITH q AS (
+            SELECT STRUCT(STRUCT(a AS x, b AS y) AS inner_value, c AS z) AS s FROM src
+        ), forwarded AS (
+            SELECT p.s AS s, p.s.inner_value AS i FROM (SELECT * FROM q) AS p
+        )
+        SELECT s.inner_value.x AS direct, i.x + 1 AS computed FROM forwarded"#,
+        Dialect::BigQuery,
+        &[
+            "direct#0 C[src.a]",
+            "computed#1 C[src.a] Expression",
+            "Closed",
+        ],
+    );
+}
+
+#[test]
+fn named_fields_of_aggregate_elements_keep_the_index_and_aggregation() {
+    common::expect_rendered_in(
+        r#"WITH q AS (SELECT a AS x, b AS y FROM src),
+        p AS (
+            SELECT ARRAY_AGG(q ORDER BY y)[OFFSET(MAX(idx))] AS item
+            FROM q CROSS JOIN (SELECT idx FROM offsets)
+        )
+        SELECT item.x AS x FROM p"#,
+        Dialect::BigQuery,
+        &["x#0 C[offsets.idx, src.a] Aggregation", "Closed"],
+    );
+}
+
+#[test]
+fn named_fields_of_structs_published_by_a_value_table() {
+    common::expect_rendered_in(
+        r#"SELECT v.s.x AS x FROM (
+            SELECT AS VALUE STRUCT(STRUCT(a AS x, b AS y) AS s, c AS z)
+            FROM src
+        ) AS v"#,
+        Dialect::BigQuery,
+        &["x#0 C[src.a]", "Closed"],
+    );
+}
+
+#[test]
+fn named_struct_fields_narrow_only_for_a_unique_proven_path() {
+    for (sql, expected) in [
+        ("SELECT q.s.x AS x FROM src AS q", "x#0 C[src.s]"),
+        (
+            "WITH q AS (SELECT STRUCT(a AS x, b AS x) AS s FROM src)
+             SELECT s.x AS x FROM q",
+            "x#0 C[src.a, src.b] Expression",
+        ),
+        (
+            "WITH q AS (SELECT STRUCT(a AS x, b AS y) AS s FROM src)
+             SELECT s.missing AS x FROM q",
+            "x#0 P[src.a, src.b | Unbound(missing)] Expression",
+        ),
+        (
+            "WITH q AS (SELECT STRUCT(a AS x, b AS y) AS s FROM src),
+                        open AS (SELECT * FROM unknown_source)
+             SELECT s.x AS x FROM q CROSS JOIN open",
+            "x#0 P[ | Unverified(s: cte q | cte open)] Expression",
+        ),
+    ] {
+        common::expect_rendered_in(sql, Dialect::BigQuery, &[expected, "Closed"]);
+    }
+}
+
+#[test]
+fn subscript_keeps_the_named_struct_field_and_index_inputs() {
+    common::expect_rendered_in(
+        r#"WITH q AS (
+            SELECT STRUCT([a] AS x, b AS y,
+                STRUCT([c] AS x, d AS y) AS nested) AS s, i FROM src
+        )
+        SELECT q.s.x[OFFSET(0)] AS fixed,
+            s.x[OFFSET(i)] AS dynamic,
+            s.nested.x[SAFE_OFFSET(i)] AS nested
+        FROM q"#,
+        Dialect::BigQuery,
+        &[
+            "fixed#0 C[src.a] Expression",
+            "dynamic#1 C[src.a, src.i] Expression",
+            "nested#2 C[src.c, src.i] Expression",
+            "Closed",
+        ],
+    );
+}
+
+#[test]
+fn subscript_preserves_unknown_and_missing_struct_field_results() {
+    common::expect_rendered_in(
+        "SELECT q.s.x[OFFSET(i)] AS item FROM src AS q",
+        Dialect::BigQuery,
+        &["item#0 C[src.i, src.s] Expression", "Closed"],
+    );
+    common::expect_rendered_in(
+        r#"WITH q AS (SELECT STRUCT([a] AS x, b AS y) AS s, i FROM src)
+        SELECT s.missing[OFFSET(i)] AS item FROM q"#,
+        Dialect::BigQuery,
+        &[
+            "item#0 P[src.a, src.b, src.i | Unbound(missing)] Expression",
+            "Closed",
+        ],
+    );
+}
+
+#[test]
+fn field_after_a_subscript_reads_the_selected_array_field_as_a_whole() {
+    common::expect_rendered_in(
+        r#"WITH q AS (
+            SELECT STRUCT([STRUCT(a AS x, b AS y)] AS arr, c AS other) AS s
+            FROM src
+        )
+        SELECT s.arr[OFFSET(0)].x AS item FROM q"#,
+        Dialect::BigQuery,
+        &["item#0 C[src.a, src.b] Expression", "Closed"],
+    );
+}

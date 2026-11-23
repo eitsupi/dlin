@@ -197,7 +197,7 @@ impl LineageBuilder {
         let Some(fields) = struct_value_fields(expr, self.graph.dialect) else {
             let ancestors = self.collect_ancestors(expr);
             let column = match ancestors.as_slice() {
-                [reference] if self.reads_whole_column(expr, *reference) => {
+                [reference] if self.reads_named_value(expr, *reference) => {
                     Some(StructValue::Column(*reference))
                 }
                 _ => None,
@@ -207,11 +207,14 @@ impl LineageBuilder {
         let mut ancestors = Vec::new();
         let mut nodes = Vec::with_capacity(fields.len());
         for (name, value) in fields {
-            let field_ancestors = self.collect_ancestors(value);
+            let (field_ancestors, shape) = self.projected_value(value);
             let kind = determine_edge_kind(value);
             let node = self.graph.add_output(name.clone(), kind.clone());
             for &ancestor in &field_ancestors {
                 self.graph.add_edge(ancestor, node, kind.clone());
+            }
+            if let Some(shape) = shape {
+                self.graph.struct_values.insert(node, shape);
             }
             ancestors.extend(field_ancestors);
             nodes.push((name, node));
@@ -219,13 +222,20 @@ impl LineageBuilder {
         (ancestors, Some(StructValue::Fields(nodes)))
     }
 
-    /// Whether `expr` is a name whose reference node `reference` stands for
-    /// the whole column it names, rather than a field below it. How the name
-    /// binds is left to the reference.
-    fn reads_whole_column(&self, expr: &Expr, reference: crate::graph::node::NodeId) -> bool {
+    /// Whether the reference stands for the entire value named by `expr`.
+    fn reads_named_value(&self, expr: &Expr, reference: crate::graph::node::NodeId) -> bool {
         use crate::graph::node::RawNode;
         match (expr, &self.graph.nodes[reference]) {
-            (Expr::Nested(inner), _) => self.reads_whole_column(inner, reference),
+            (Expr::Nested(inner), _) => self.reads_named_value(inner, reference),
+            (Expr::CompoundIdentifier(_), _) if self.graph.field_paths.contains_key(&reference) => {
+                true
+            }
+            (Expr::CompoundFieldAccess { access_chain, .. }, _) => {
+                self.graph.field_paths.contains_key(&reference)
+                    && access_chain
+                        .iter()
+                        .all(|access| matches!(access, AccessExpr::Dot(Expr::Identifier(_))))
+            }
             (
                 Expr::Identifier(_),
                 RawNode::Unqualified { .. }

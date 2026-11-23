@@ -509,7 +509,30 @@ impl LineageBuilder {
         root: &Expr,
         access_chain: &[AccessExpr],
     ) -> Vec<NodeId> {
-        let mut ancestors = match (root, access_chain.first()) {
+        let prefix = self
+            .dialect
+            .supports_column_field_star()
+            .then(|| dotted_identifier_prefix(root, access_chain))
+            .flatten();
+        let mut ancestors = if let Some(parts) = prefix {
+            self.collect_compound_identifier_ancestors(&parts)
+        } else {
+            self.collect_field_root_ancestors(root, access_chain.first())
+        };
+        for access in access_chain {
+            if let AccessExpr::Subscript(subscript) = access {
+                ancestors.extend(self.collect_subscript_ancestors(subscript));
+            }
+        }
+        ancestors
+    }
+
+    fn collect_field_root_ancestors(
+        &mut self,
+        root: &Expr,
+        first_access: Option<&AccessExpr>,
+    ) -> Vec<NodeId> {
+        match (root, first_access) {
             (Expr::Identifier(binding_name), Some(AccessExpr::Dot(Expr::Identifier(field))))
                 if self
                     .graph
@@ -548,14 +571,7 @@ impl LineageBuilder {
                 )]
             }
             _ => self.collect_ancestors(root),
-        };
-
-        for access in access_chain {
-            if let AccessExpr::Subscript(subscript) = access {
-                ancestors.extend(self.collect_subscript_ancestors(subscript));
-            }
         }
-        ancestors
     }
 
     /// Resolve a plain dotted identifier by separating its relation binding
@@ -570,7 +586,9 @@ impl LineageBuilder {
         if let Some((prefix_len, binding)) = self.find_compound_binding(parts) {
             let qualifier = parts[..prefix_len].iter().map(Ident::from_ast).collect();
             let column = Ident::from_ast(&parts[prefix_len]);
-            return vec![self.add_bound_field_ancestor(qualifier, column, Some(binding))];
+            let reference = self.add_bound_field_ancestor(qualifier, column, Some(binding));
+            self.record_field_path(reference, &parts[prefix_len + 1..]);
+            return vec![reference];
         }
 
         // With no visible relation bindings, preserve the traditional
@@ -627,8 +645,7 @@ impl LineageBuilder {
         }
 
         // No relation prefix was found: `struct.field` is an unqualified
-        // top-level column followed by a nested field path.  Only the
-        // top-level column can be represented by the public ColumnOrigin API.
+        // top-level column followed by a nested field path.
         let column = Ident::from_ast(&parts[0]);
         let binding = self
             .graph
@@ -636,10 +653,26 @@ impl LineageBuilder {
             .lookup(self.env(), &column)
             .cloned()
             .filter(|binding| matches!(binding, Binding::VirtualSource(_)));
-        vec![
+        let ambiguous = self
+            .graph
+            .scopes
+            .ambiguous_binding_candidates(self.env(), &column)
+            .is_some();
+        let reference = self
+            .graph
+            .add_unqualified_with_binding(column, self.env(), binding);
+        if !ambiguous {
+            self.record_field_path(reference, &parts[1..]);
+        }
+        vec![reference]
+    }
+
+    fn record_field_path(&mut self, reference: NodeId, path: &[ast::Ident]) {
+        if !path.is_empty() && self.dialect.supports_column_field_star() {
             self.graph
-                .add_unqualified_with_binding(column, self.env(), binding),
-        ]
+                .field_paths
+                .insert(reference, path.iter().map(Ident::from_ast).collect());
+        }
     }
 
     /// Find the longest visible relation prefix in a compound identifier.
@@ -716,6 +749,22 @@ impl LineageBuilder {
             }
         }
     }
+}
+
+/// The named value before the first access whose shape is not modelled.
+fn dotted_identifier_prefix(root: &Expr, access_chain: &[AccessExpr]) -> Option<Vec<ast::Ident>> {
+    let mut parts = match root {
+        Expr::Identifier(identifier) => vec![identifier.clone()],
+        Expr::CompoundIdentifier(parts) => parts.clone(),
+        _ => return None,
+    };
+    for access in access_chain {
+        let AccessExpr::Dot(Expr::Identifier(field)) = access else {
+            break;
+        };
+        parts.push(field.clone());
+    }
+    (parts.len() > 1).then_some(parts)
 }
 
 fn table_parts(table: &TableRef) -> Vec<&Ident> {
