@@ -383,6 +383,7 @@ These synthetic results use artifacts derived from the real dbt fixture. Each ti
 - **Requires `dbt compile`**: no SQL parse mode fallback; manifest with compiled SQL is always needed
 - **Value dependencies only**: row dependencies (filter predicates, join conditions) are not collected
 - **Partial results**: `SELECT *` over relations without known columns, unsupported syntax and ambiguous names leave lineage partial. In JSON, check `output.columns[].lineage.status`, `output.columns[].lineage.unresolved[]`, `output.shape` and `boundaries[]`; `errors[]` holds diagnostics such as parse failures
+- **Nested field precision**: a STRUCT field is traced to the inputs of that field when the SQL that builds the STRUCT is in the same query. Across dbt model boundaries, and through `CAST`, `CASE`, set operations, array subscripts or `UNNEST` of an array built elsewhere, lineage follows the containing column as a whole. For example, tracing `s.x` from a model that reads `s` from another model includes the inputs of `s.y`, even when the result is `complete`
 - **YAML column lists are assumed complete**: when a YAML column list is used as a schema, it is treated as exhaustive; results that rely on this cite it in `evidence[]` and show an `assumes` note in plain, Mermaid and DOT output
 - **Dialect**: auto-detected from the manifest's `adapter_type`; pass `--dialect` to override
 - **Cache**: results are cached in `.dlin_cache/` (`--no-cache` and `--refresh-cache` control it)
