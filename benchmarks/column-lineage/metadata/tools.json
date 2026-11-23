@@ -8,10 +8,10 @@
   "comparison_targets": [
     {
       "name": "dlin",
-      "version": "0.3.0-rc.1",
+      "version": "0.3.0-rc.2",
       "binary": "dlin",
       "version_command": "dlin --version",
-      "install": "uv tool install --reinstall dlin-cli==0.3.0rc1",
+      "install": "uv tool install --reinstall dlin-cli==0.3.0rc2",
       "commands": {
         "upstream": "dlin column upstream i01_deep_08 --column amount_double --manifest-path artifacts/manifest.json --no-cache -o json",
         "downstream": "dlin column downstream i05_fanout_base --column amount --manifest-path artifacts/manifest.json --no-cache -o json"

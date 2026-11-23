@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import bounded_run
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = ROOT / "results" / "local" / "scalability"
@@ -44,7 +46,7 @@ def preflight_valid() -> bool:
 
 def run_capture(argv: list[str], cwd: Path, timeout: int, stdout_path: Path, stderr_path: Path) -> int:
     try:
-        completed = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout)
+        completed = bounded_run.run(argv, cwd, timeout)
         stdout_path.write_text(completed.stdout)
         stderr_path.write_text(completed.stderr)
         return completed.returncode
@@ -345,9 +347,9 @@ def metadata(path: Path) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="append", required=True)
-    parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--warmup", type=int, default=1)
-    parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--runs", type=int, default=10)
+    parser.add_argument("--warmup", type=int, default=2)
+    parser.add_argument("--timeout", type=int, default=60)
     parser.add_argument("--allow-manual", action="store_true")
     args = parser.parse_args()
     if args.runs < 1 or args.warmup < 0 or args.timeout < 1:

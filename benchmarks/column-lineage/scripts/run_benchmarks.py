@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import bounded_run
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULTS = ROOT / "results" / "local" / "benchmark"
@@ -49,13 +51,10 @@ def preflight_is_valid() -> bool:
 def ensure_preflight() -> None:
     if preflight_is_valid():
         return
-    completed = subprocess.run(
+    completed = bounded_run.run(
         ["uv", "run", "--locked", "python", "scripts/preflight_tools.py"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=180,
+        ROOT,
+        180,
     )
     if completed.returncode != 0 or not preflight_is_valid():
         raise RuntimeError("preflight status is not 10/10 valid")
@@ -72,14 +71,7 @@ def prepare(name: str, argv: list[str]) -> bool:
     stdout_path = RESULTS / f"{name}.stdout"
     stderr_path = RESULTS / f"{name}.stderr"
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=60,
-        )
+        completed = bounded_run.run(argv, ROOT, 60)
     except (OSError, subprocess.TimeoutExpired) as error:
         write(stdout_path, "")
         write(stderr_path, str(error))
@@ -115,14 +107,7 @@ def benchmark(
     ]
     outer_timeout = (runs + warmup) * 60 + 30
     try:
-        completed = subprocess.run(
-            invocation,
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=outer_timeout,
-        )
+        completed = bounded_run.run(invocation, ROOT, outer_timeout)
         exit_code = completed.returncode
         stdout = completed.stdout
         stderr = completed.stderr

@@ -79,6 +79,11 @@ def file_metadata(path: Path, expected: dict | None = None) -> dict:
     return actual
 
 
+RUNS = 10
+WARMUP = 2
+TIMEOUT_SECONDS = 60
+
+
 def hyperfine_stats(scenario: dict, runs: int) -> dict:
     path = ROOT / scenario["hyperfine_json"]
     payload = load(path)
@@ -100,7 +105,7 @@ def scenario_record(scenario: dict, runs: int) -> dict:
     reason = scenario.get("reason")
     if scenario.get("exit_code") == 124:
         status = "timeout"
-        reason = f"timeout after {scenario.get('timeout_seconds', 120)} seconds"
+        reason = f"timeout after {scenario.get('timeout_seconds', TIMEOUT_SECONDS)} seconds"
     if status == "valid":
         if scenario.get("exit_code") != 0:
             raise RuntimeError(f"valid scenario has nonzero exit: {scenario['name']}")
@@ -139,7 +144,7 @@ def profile_result(profile: dict) -> dict:
     run = load(run_path)
     if run.get("profile") != name or workload.get("profile") != name:
         raise RuntimeError(f"profile mismatch: {name}")
-    if run.get("runs") != 3 or run.get("warmup") != 1 or run.get("timeout_seconds") != 120:
+    if run.get("runs") != RUNS or run.get("warmup") != WARMUP or run.get("timeout_seconds") != TIMEOUT_SECONDS:
         raise RuntimeError(f"run configuration mismatch: {name}")
     if workload.get("family") != profile["family"] or workload.get("parameters") != profile["parameters"]:
         raise RuntimeError(f"workload profile mismatch: {name}")
@@ -193,7 +198,7 @@ def ratios(profiles: list[dict]) -> list[dict]:
                 before = next((item for item in previous["scenarios"] if item["name"] == scenario_name), None)
                 after = next((item for item in current["scenarios"] if item["name"] == scenario_name), None)
                 if before is not None and after is not None and before["status"] == "valid" and after["status"] == "valid":
-                    ratio = after["mean"] / before["mean"]
+                    ratio = after["median"] / before["median"]
                     reason = "both consecutive measurements valid"
                 else:
                     ratio = None
@@ -201,7 +206,7 @@ def ratios(profiles: list[dict]) -> list[dict]:
                     for label, item in ((previous["name"], before), (current["name"], after)):
                         missing.append(f"{label}:{item['status'] if item else 'not_run'}")
                     reason = "; ".join(missing)
-                output.append({"family": family, "scenario": scenario_name, "from_profile": previous["name"], "to_profile": current["name"], "mean_ratio": ratio, "reason": reason})
+                output.append({"family": family, "scenario": scenario_name, "from_profile": previous["name"], "to_profile": current["name"], "median_ratio": ratio, "reason": reason})
     return output
 
 
@@ -212,8 +217,8 @@ def format_measure(profile: dict, scenario_name: str, ratio_map: dict) -> str:
     if scenario["status"] != "valid":
         return scenario["status"]
     ratio = ratio_map.get((profile["name"], scenario_name))
-    ratio_text = "" if ratio is None or ratio["mean_ratio"] is None else f"; {ratio['mean_ratio']:.2f}x"
-    return f"{scenario['mean']:.6f}s{ratio_text}"
+    ratio_text = "" if ratio is None or ratio["median_ratio"] is None else f"; {ratio['median_ratio']:.2f}x"
+    return f"{scenario['median']:.6f}s{ratio_text}"
 
 
 def markdown(result: dict) -> str:
@@ -234,7 +239,7 @@ def markdown(result: dict) -> str:
     lines = [
         "# Synthetic scalability results",
         "",
-        "These are three-run, one-warmup measurements with a 120-second inner timeout. They use synthetic artifacts derived from the real dbt fixture and do not represent real projects. No single winner is declared.",
+        "Each time is the median of ten runs after two warmups, with a 60-second timeout on every run, and each ratio compares the medians of consecutive profiles. They use synthetic artifacts derived from the real dbt fixture and do not represent real projects. No single winner is declared.",
         "",
         "## Run context",
         "",
@@ -275,8 +280,9 @@ def markdown(result: dict) -> str:
         "- dlin scenarios without a suffix use `--no-cache` and include manifest loading, SQL analysis and the query. `_warm` scenarios reuse a cache filled once by the same query with `--refresh-cache`. OS cache drop is not performed.",
         "- Parrant has no persistent cache; its timings include project parsing. dbt-meta build and query are separate scenarios; its end-to-end time is build plus query.",
         "- Parrant is installed with SQLGlot 26.33.0. dbt-meta is installed with `sqlglot[c]` 30.33.0, the compiled SQLGlot its documentation recommends; the preflight checks both.",
-        "- A build-then-query tool can answer repeated queries from its artifact: dbt-meta's query alone can be faster than a dlin query without a cache. Compare dlin's warm-cache time with it for repeated use, and the end-to-end times for a single query.",
+        "- A build-then-query tool answers repeated queries from its artifact, so for repeated use compare dbt-meta's query time with dlin's warm-cache time; for a single query, compare the end-to-end times.",
         "- Peak RSS is N/A. Canva is excluded. `unsupported` means the tool has no such query; `not_benchmarked` means the tool runs it but its output cannot be validated (Parrant's whole-model selection returns text, not per-column JSON). Invalid results and timeouts are also shown as non-numeric statuses.",
+        "- The median keeps a single slow run, such as one disturbed by other work on the machine, from moving the reported time. `results.json` also keeps every run time with the mean, standard deviation, minimum and maximum.",
     ])
     for profile in result["profiles"]:
         for scenario in profile["scenarios"]:
@@ -295,9 +301,9 @@ def main() -> int:
         "environment": {"os": platform.platform(), "arch": platform.machine() or None, "cpu_model": cpu_model()},
         "git_head": git_head(),
         "tool_versions": [{key: target[key] for key in ("name", "version", "binary", "install")} for target in load(TOOLS)["comparison_targets"]],
-        "runs": 3,
-        "warmup": 1,
-        "timeout_seconds": 120,
+        "runs": RUNS,
+        "warmup": WARMUP,
+        "timeout_seconds": TIMEOUT_SECONDS,
         "profiles": profiles,
     }
     result["ratios"] = ratios(profiles)
