@@ -1292,6 +1292,10 @@ fn slot_ref<S>(unique_id: &str, model: &str, slot: &OutputSlot<S>) -> ModelOutpu
     }
 }
 
+/// The models and snapshots that depend on each model or snapshot, in
+/// unique_id order. The manifest's nodes are unordered, so the dependents are
+/// sorted to make the search, and the order of what it reports, the same on
+/// every run.
 pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -1310,6 +1314,9 @@ pub(super) fn build_downstream_model_map(manifest: &Manifest) -> HashMap<String,
         }
     }
 
+    for dependents in map.values_mut() {
+        dependents.sort_unstable();
+    }
     map
 }
 

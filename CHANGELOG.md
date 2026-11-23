@@ -15,6 +15,7 @@
 
 - Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT.
 - Trace named STRUCT field references to the selected field when its binding and shape are known.
+- Report the diagnostics of `dlin column downstream` and the MCP `get_column_lineage` tool with `direction: downstream` in the same order on every run. The dependents of a model were visited in the manifest's hash order, so the order of `errors` changed between runs
 
 ## [0.3.0-rc.1] - 2026-11-23
 
