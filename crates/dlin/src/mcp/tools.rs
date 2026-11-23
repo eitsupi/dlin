@@ -54,7 +54,7 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_lineage",
-            "description": "Return the lineage subgraph around a set of models as nodes and directed edges. Use upstream_depth and downstream_depth to control traversal depth.",
+            "description": "Return the lineage subgraph around a set of models as nodes and directed edges. Use upstream_depth and downstream_depth to control traversal depth. An optional exploration field reports known upstream dependency gaps within the requested depth, even when their nodes are outside the current page. Manifest dependencies are used as declared.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -414,7 +414,7 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
         .iter()
         .map(|&idx| state.dag()[idx].unique_id.clone())
         .collect();
-    let filtered = if focus_nodes.is_empty() {
+    let (filtered, exploration) = if focus_nodes.is_empty() {
         Default::default()
     } else {
         graph::filter::filter_graph_by_indices(
@@ -472,7 +472,12 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
         let node = &filtered[*idx];
         json!({"unique_id":node.unique_id, "name":node.label, "node_type":node.node_type.label()})
     }).collect();
-    Ok(json!({"nodes":nodes, "edges":edges, "not_found":not_found, "page":page.metadata()}))
+    let mut result =
+        json!({"nodes":nodes, "edges":edges, "not_found":not_found, "page":page.metadata()});
+    if let Some(exploration) = exploration {
+        result["exploration"] = json!(exploration);
+    }
+    Ok(result)
 }
 
 pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {

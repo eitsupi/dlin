@@ -490,3 +490,99 @@ fn manifest_impact_traverses_edges_from_tests() {
         serde_json::json!([{"type": "not_assessed", "scope": "manifest_dependencies"}])
     );
 }
+
+#[test]
+fn focused_graph_reports_upstream_gaps_before_output_projection() {
+    let tmp = small_project(&[
+        (
+            "models/middle.sql",
+            r#"select {{ external_pkg.opaque() }} from {{ ref('orders') }}"#,
+        ),
+        (
+            "models/root.sql",
+            r#"select * from {{ ref('middle') }} union all select * from {{ ref('customers') }}"#,
+        ),
+    ]);
+    let graph = |options: &[&str]| {
+        let mut args = vec![
+            "graph",
+            "root",
+            "--source",
+            "sql",
+            "--no-cache",
+            "-d",
+            "0",
+            "-o",
+            "json",
+            "-q",
+        ];
+        args.extend(options);
+        serde_json::from_slice::<serde_json::Value>(&run(tmp.path(), &args).stdout).unwrap()
+    };
+    for depth in ["0", "1"] {
+        assert!(graph(&["-u", depth]).get("exploration").is_none());
+    }
+    let unbounded = graph(&[]);
+    assert_eq!(unbounded["edges"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        unbounded["exploration"]["kind"],
+        "upstream_model_dependency"
+    );
+    assert_eq!(unbounded["exploration"]["status"], "incomplete");
+    let gaps = unbounded["exploration"]["gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0]["unique_id"], "model.middle");
+    assert_eq!(gaps[0]["depth"], 1);
+    assert_eq!(gaps[0]["reasons"][0]["type"], "unsupported_macro_namespace");
+    for filter in [&["-s", "root"][..], &["--node-type", "source"][..]] {
+        let mut args = vec!["-u", "2"];
+        args.extend(filter);
+        let filtered = graph(&args);
+        assert!(
+            filtered["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node["unique_id"] != "model.middle")
+        );
+        assert_eq!(filtered["exploration"], unbounded["exploration"]);
+    }
+
+    let downstream_only = run(
+        tmp.path(),
+        &["graph", "orders", "-u", "0", "-d", "2", "-o", "json", "-q"],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&downstream_only.stdout).unwrap();
+    assert!(value.get("exploration").is_none());
+    assert_eq!(value["nodes"].as_array().unwrap().len(), 4);
+
+    let text = run(
+        tmp.path(),
+        &["graph", "root", "-u", "2", "-d", "0", "--verbose"],
+    );
+    let stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(stderr.contains("upstream lineage exploration is incomplete at 1 node(s)"));
+    assert!(stderr.contains(
+        "upstream dependency gap at model.middle (depth 1): unsupported_macro_namespace"
+    ));
+}
+
+#[test]
+fn closest_focus_determines_the_depth_of_each_gap() {
+    let tmp = small_project(&[
+        (
+            "models/middle.sql",
+            r#"select {{ external_pkg.opaque() }} from {{ ref('customers') }}"#,
+        ),
+        ("models/root.sql", r#"select * from {{ ref('middle') }}"#),
+    ]);
+    let output = run(
+        tmp.path(),
+        &[
+            "graph", "root", "middle", "-u", "1", "-d", "0", "-o", "json", "-q",
+        ],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["exploration"]["gaps"][0]["unique_id"], "model.middle");
+    assert_eq!(value["exploration"]["gaps"][0]["depth"], 0);
+}

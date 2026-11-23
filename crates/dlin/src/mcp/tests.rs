@@ -1215,3 +1215,65 @@ fn column_pages_preserve_each_impact_and_gap_at_both_detail_levels() {
         assert_eq!(gaps, all_gaps);
     }
 }
+
+#[test]
+fn lineage_exploration_is_depth_bounded_and_independent_of_page() {
+    use dlin_core::graph::builder::build_graph_report;
+    use dlin_core::parser::discovery::DiscoveredFiles;
+
+    let mut state = state();
+    let manifest_lineage =
+        get_lineage(&json!({"models":["orders"],"upstream_depth":10}), &state).unwrap();
+    assert!(manifest_lineage.get("exploration").is_none());
+
+    // MCP normally loads a manifest. Inject a real SQL build to exercise the
+    // same response path with unresolved dependency evidence.
+    let tmp = tempfile::tempdir().unwrap();
+    let files = [
+        ("base.sql", "select 1 as id"),
+        (
+            "middle.sql",
+            r#"select {{ external_pkg.opaque() }} from {{ ref('base') }}"#,
+        ),
+        (
+            "root.sql",
+            r#"select * from {{ ref('base') }} union all select * from {{ ref('middle') }}"#,
+        ),
+    ];
+    let mut discovered = DiscoveredFiles::default();
+    for (name, sql) in files {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, sql).unwrap();
+        discovered.model_sql_files.push(path);
+    }
+    state.build =
+        build_graph_report(tmp.path(), "project", &discovered, &Default::default()).unwrap();
+
+    for depth in [0, 1] {
+        let response = get_lineage(
+            &json!({"models":["root"],"upstream_depth":depth,"downstream_depth":0}),
+            &state,
+        )
+        .unwrap();
+        assert!(response.get("exploration").is_none());
+    }
+
+    let request = json!({"name":"get_lineage","arguments":{"models":["root"],"upstream_depth":10,"downstream_depth":0,"limit":1}});
+    let first = body(&call_tool(&request, &state).unwrap());
+    assert_eq!(first["exploration"]["status"], "incomplete");
+    let gap = &first["exploration"]["gaps"][0];
+    assert_eq!(gap["unique_id"], "model.middle");
+    assert_eq!(gap["depth"], 1);
+    assert_eq!(gap["reasons"][0]["type"], "unsupported_macro_namespace");
+    let mut next = request;
+    next["arguments"]["cursor"] = first["page"]["next_cursor"].clone();
+    let second = body(&call_tool(&next, &state).unwrap());
+    assert!(
+        second["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["unique_id"] != "model.middle")
+    );
+    assert_eq!(first["exploration"], second["exploration"]);
+}

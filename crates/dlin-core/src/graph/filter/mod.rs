@@ -6,6 +6,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::DbtLineageError;
 
+use super::dependency::{DependencyReason, NotAssessedScope};
+use super::impact::{Exploration, ExplorationGap, ExplorationKind};
 use super::types::*;
 
 /// Resolve a name with canonical ID, alias, label, and ID suffix precedence.
@@ -263,6 +265,7 @@ pub fn filter_graph(
         selectors,
         transitive,
     )
+    .map(|(graph, _)| graph)
 }
 
 /// Filter a graph using focus indices already resolved in that graph.
@@ -273,7 +276,7 @@ pub fn filter_graph_by_indices(
     downstream: Option<usize>,
     selectors: &[Selector],
     transitive: bool,
-) -> Result<LineageGraph> {
+) -> Result<(LineageGraph, Option<Exploration>)> {
     // Check for cycles
     if petgraph::algo::is_cyclic_directed(graph) {
         let cycle = find_directed_cycle(graph)
@@ -286,33 +289,33 @@ pub fn filter_graph_by_indices(
         );
     }
 
-    let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
+    let mut keep_nodes = HashSet::new();
+    let mut gaps = Vec::new();
 
-    if !focus_nodes.is_empty() {
-        for &focus_idx in focus_nodes {
-            keep_nodes.insert(focus_idx);
-
-            // BFS upstream (predecessors)
-            bfs_collect(
-                graph,
-                focus_idx,
-                Direction::Incoming,
-                upstream,
-                &mut keep_nodes,
-            );
-
-            // BFS downstream (successors)
-            bfs_collect(
-                graph,
-                focus_idx,
-                Direction::Outgoing,
-                downstream,
-                &mut keep_nodes,
-            );
-        }
-    } else {
-        // No focus models -- keep all nodes
+    if focus_nodes.is_empty() {
         keep_nodes.extend(graph.node_indices());
+    } else {
+        bfs_collect(
+            graph,
+            focus_nodes,
+            Direction::Incoming,
+            upstream,
+            |idx, depth| {
+                keep_nodes.insert(idx);
+                if upstream != Some(depth) {
+                    gaps.extend(upstream_gap(&graph[idx], depth));
+                }
+            },
+        );
+        bfs_collect(
+            graph,
+            focus_nodes,
+            Direction::Outgoing,
+            downstream,
+            |idx, _| {
+                keep_nodes.insert(idx);
+            },
+        );
     }
 
     // Apply selector filter: intersect with BFS results (or use as base set)
@@ -330,11 +333,39 @@ pub fn filter_graph_by_indices(
         }
     }
 
-    if transitive {
-        Ok(build_subgraph_with_transitive(graph, &keep_nodes))
+    let filtered = if transitive {
+        build_subgraph_with_transitive(graph, &keep_nodes)
     } else {
-        Ok(build_subgraph(graph, &keep_nodes))
-    }
+        build_subgraph(graph, &keep_nodes)
+    };
+    Ok((filtered, upstream_exploration(gaps)))
+}
+
+fn upstream_gap(node: &NodeData, depth: usize) -> Option<ExplorationGap> {
+    let reasons: Vec<_> = node
+        .dependency_analysis
+        .unresolved()
+        .iter()
+        .filter(|reason| {
+            !matches!(
+                reason,
+                DependencyReason::NotAssessed {
+                    scope: NotAssessedScope::ManifestDependencies
+                        | NotAssessedScope::PhantomDependencies,
+                }
+            )
+        })
+        .cloned()
+        .collect();
+    (!reasons.is_empty()).then(|| ExplorationGap::UnresolvedDependencies {
+        unique_id: node.unique_id.clone(),
+        depth: Some(depth),
+        reasons,
+    })
+}
+
+fn upstream_exploration(gaps: Vec<ExplorationGap>) -> Option<Exploration> {
+    (!gaps.is_empty()).then(|| Exploration::new(ExplorationKind::UpstreamModelDependency, gaps))
 }
 
 /// Find one real directed cycle, with its first node repeated at the end.
@@ -674,29 +705,30 @@ pub fn filter_by_search(graph: &LineageGraph, patterns: &[regex::Regex]) -> Line
 /// BFS traversal collecting nodes up to max_depth levels away
 fn bfs_collect(
     graph: &LineageGraph,
-    start: NodeIndex,
+    starts: &[NodeIndex],
     direction: Direction,
     max_depth: Option<usize>,
-    collected: &mut HashSet<NodeIndex>,
+    mut visit: impl FnMut(NodeIndex, usize),
 ) {
-    let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
-    queue.push_back((start, 0));
-    let mut visited: HashSet<NodeIndex> = HashSet::new();
-    visited.insert(start);
+    let mut visited = HashSet::new();
+    let mut queue: VecDeque<_> = starts
+        .iter()
+        .copied()
+        .filter(|&idx| visited.insert(idx))
+        .map(|idx| (idx, 0))
+        .collect();
 
     while let Some((node, depth)) = queue.pop_front() {
-        // Skip expansion if at max depth
-        if max_depth.is_some_and(|max| depth >= max) {
+        visit(node, depth);
+        if max_depth == Some(depth) {
             continue;
         }
-
         for e in graph.edges_directed(node, direction) {
             let neighbor = match direction {
                 Direction::Incoming => e.source(),
                 Direction::Outgoing => e.target(),
             };
             if visited.insert(neighbor) {
-                collected.insert(neighbor);
                 queue.push_back((neighbor, depth + 1));
             }
         }

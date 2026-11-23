@@ -59,7 +59,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     // Filter graph
     let transitive = !args.no_transitive;
     let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
-    let filtered = graph::filter::filter_graph_by_indices(
+    let (filtered, exploration) = graph::filter::filter_graph_by_indices(
         dag,
         &focus_nodes,
         args.upstream,
@@ -173,15 +173,23 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
 
-    render_output(
-        &args.output,
-        &filtered,
-        sql_contents.as_ref(),
-        &json_fields,
-        args.group_by,
-        args.direction,
-        args.show_columns,
-    );
+    if matches!(args.output, cli::OutputFormat::Json) {
+        render::json::render_json(
+            &filtered,
+            sql_contents.as_ref(),
+            &json_fields,
+            exploration.as_ref(),
+        );
+    } else {
+        warn_upstream_exploration(exploration.as_ref());
+        render_output(
+            &args.output,
+            &filtered,
+            args.group_by,
+            args.direction,
+            args.show_columns,
+        );
+    }
 
     Ok(())
 }
@@ -310,8 +318,6 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
 fn render_output(
     format: &cli::OutputFormat,
     graph: &graph::types::LineageGraph,
-    sql_contents: Option<&HashMap<String, String>>,
-    json_fields: &std::collections::HashSet<String>,
     group_by: Option<GroupBy>,
     direction: Direction,
     show_columns: bool,
@@ -319,7 +325,7 @@ fn render_output(
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
         cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by, direction),
-        cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
+        cli::OutputFormat::Json => unreachable!("JSON output is handled separately"),
         cli::OutputFormat::Mermaid => {
             render::mermaid::render_mermaid(graph, group_by, direction, show_columns)
         }

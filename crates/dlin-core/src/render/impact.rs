@@ -576,6 +576,7 @@ mod tests {
         use crate::graph::impact::ExplorationGap;
         let node_gap = |i: usize| ExplorationGap::UnresolvedDependencies {
             unique_id: format!("model.m{i:02}"),
+            depth: None,
             reasons: vec![DependencyReason::JinjaRenderFailed {
                 at: NodeCallSite {
                     unique_id: format!("model.m{i:02}"),

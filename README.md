@@ -392,6 +392,8 @@ These synthetic results use artifacts derived from the real dbt fixture. Each ti
 
 For `graph`, `list`, and `impact`, an exact unique ID takes precedence. A short name prefers models when other node types share the name. If multiple candidates remain, the command reports their IDs and asks you to specify one. `--node-type` filters the output, and `--select` matches a set of nodes.
 
+When `graph` follows a focus upstream in SQL mode, it reports the reached nodes whose dependencies were not fully extracted, because they can hide part of the upstream lineage. The JSON output has an `exploration` object with each node's `unique_id`, its shortest `depth` from a focus, and the reasons. A node at the depth limit is not reported. `--node-type` and `--select` do not hide these reports. Other formats print a summary on stderr, and `--verbose` lists each node. The MCP `get_lineage` tool returns the same `exploration`. With a manifest, dependencies are taken as declared and nothing is reported.
+
 ### `list`
 
 ```sh

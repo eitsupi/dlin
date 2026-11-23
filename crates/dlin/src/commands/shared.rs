@@ -42,6 +42,35 @@ fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
+pub(super) fn warn_upstream_exploration(exploration: Option<&graph::impact::Exploration>) {
+    let Some(exploration) = exploration.filter(|_| !dlin_core::is_quiet()) else {
+        return;
+    };
+    dlin_core::warn!(
+        "upstream lineage exploration is incomplete at {} node(s)",
+        exploration.gaps().len()
+    );
+    if is_verbose() {
+        for gap in exploration.gaps() {
+            if let graph::impact::ExplorationGap::UnresolvedDependencies {
+                unique_id,
+                depth: Some(depth),
+                reasons,
+            } = gap
+            {
+                let codes: std::collections::BTreeSet<_> = reasons
+                    .iter()
+                    .map(|reason| reason.reason_code().as_str())
+                    .collect();
+                dlin_core::warn!(
+                    "upstream dependency gap at {unique_id} (depth {depth}): {}",
+                    codes.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+        }
+    }
+}
+
 /// Build the lineage DAG from either a manifest file or by parsing SQL
 /// files, and report the manifest load warnings and the dependency
 /// analysis on stderr once.

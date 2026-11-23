@@ -487,6 +487,7 @@ mod exploration {
             gaps(&report),
             [ExplorationGap::UnresolvedDependencies {
                 unique_id: "model.b".to_string(),
+                depth: None,
                 reasons: vec![namespaced("model.b", "dbt_utils")],
             }]
         );
@@ -543,6 +544,7 @@ mod exploration {
             gaps(&from_b),
             [ExplorationGap::UnresolvedDependencies {
                 unique_id: "model.a".to_string(),
+                depth: None,
                 reasons: vec![namespaced("model.a", "dbt")],
             }]
         );
@@ -730,6 +732,7 @@ mod exploration {
     fn project_gaps_need_their_own_permission() {
         let empty_reasons = ExplorationGap::UnresolvedDependencies {
             unique_id: "model.x".to_string(),
+            depth: None,
             reasons: vec![],
         };
         let permissive = DependencyPolicy::deny_all().allow_reason(

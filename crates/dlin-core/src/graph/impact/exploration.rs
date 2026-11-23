@@ -24,6 +24,8 @@ use crate::graph::types::{LineageGraph, NodeType};
 pub enum ExplorationKind {
     /// Model-level dependencies: `ref()`, `source()`, tests and exposures.
     ModelDependency,
+    /// The upstream model dependencies of a focused query.
+    UpstreamModelDependency,
 }
 
 /// Whether an exploration may have missed a node.
@@ -40,11 +42,13 @@ pub enum ExplorationStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExplorationGap {
-    /// A node outside the reached set whose dependencies were not fully
-    /// analysed: one of them may come from the reached set. `reasons` holds
-    /// only those reasons, and is never empty.
+    /// A consumer whose unresolved incoming dependencies can hide nodes.
+    /// In an upstream query, `depth` is its distance from the closest focus.
+    /// In an impact query the consumer is outside the reached set.
     UnresolvedDependencies {
         unique_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        depth: Option<usize>,
         reasons: Vec<NodeDependencyReason>,
     },
     /// An input was skipped while building the graph. It does not belong to
@@ -183,6 +187,7 @@ pub(crate) fn explore_model_dependencies(
         if !reasons.is_empty() {
             gaps.push(ExplorationGap::UnresolvedDependencies {
                 unique_id: node.unique_id.clone(),
+                depth: None,
                 reasons,
             });
         }
