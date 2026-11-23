@@ -396,21 +396,25 @@ dlin list --node-type source                                # sources only
 
 ### `impact`
 
+By default, impact reports every downstream node type except tests. A test is the end of a path in dbt: nothing can `ref()` it, so it never leads to another node. Use `--node-type` to choose the types to report, such as `--node-type model,test` or `--node-type test`; it replaces the default. MCP `get_impact` takes the same selection as a `node_types` array. Paths and distances still pass through nodes of any type.
+
+Reports include the effective `node_types`. In JSON, each of `affected_models`, `affected_tests`, and `affected_exposures` is null when its type is outside the selection. `overall_severity` is null when no selected node was reached. Exposure paths are reported only when exposures are selected.
+
 ```sh
 $ dlin impact orders
 Impact Analysis: orders
 ==================================================
+Node Types: model, source, seed, snapshot, exposure, semantic_model, metric, saved_query
 Overall Severity: CRITICAL
 
 Summary:
   Affected models:    1
-  Affected tests:     1
+  Affected tests:     out of scope
   Affected exposures: 1
 
 Impacted Nodes:
   [critical] weekly_report (exposure, distance: 1)
   [high    ] customers (model, distance: 1) [models/marts/customers.sql]
-  [low     ] assert_orders_positive_amount (test, distance: 1)
 ```
 
 ### Completeness of model-level dependencies
@@ -418,7 +422,7 @@ Impacted Nodes:
 dlin reports where it could not analyse the model-level dependencies (`ref()`, `source()`, tests, exposures), so a program can tell whether a result may be missing something.
 
 - **Each node** has `dependency_analysis` in `list` JSON (by default), in `graph` JSON (with `--json-full` or `--json-fields dependency_analysis`) and in `impact` JSON. Its `status` is `complete` or `partial`; `unresolved` lists a typed reason for each part that could not be analysed. `complete` means that, under dlin's evaluation rules, no part was left unresolved. In particular, `env_var()` is evaluated with its default, so a different value at run time can select another dependency; check run-time dependencies with a manifest generated for that environment.
-- **Each impact report** has `exploration`, which says whether the reached nodes can be missing a node. It is `complete` only when no node outside the reached set has reasons (phantom nodes, which stand for unresolved targets, are left out; the nodes referencing them carry the reasons), no input was skipped and no scope went unassessed. Otherwise `gaps` lists why. An empty `exploration` means the search did not run, as for an input that is an unresolved reference. Manifest mode takes the manifest's dependencies as they are, so its exploration is always incomplete with `not_assessed` (`manifest_dependencies`).
+- **Each impact report** has `exploration`, which says whether the reached nodes can be missing a node. It is `complete` when there are no gaps that could hide a node of a selected type. Node-level gaps come from unreached targets or their unreached dependencies. Skipped inputs and project-wide unassessed scopes still count. Otherwise `gaps` lists why. An empty `exploration` means the search did not run, as for an input that is an unresolved reference. Manifest mode takes the manifest's dependencies as they are, so its exploration is always incomplete with `not_assessed` (`manifest_dependencies`).
 - `complete` concerns the reached set only. It does not confirm that each reached node is affected, nor the distances or paths. It is relative to the project and the paths it configures: a configured path that does not exist is a warning, not a gap.
 - A node whose analysis is `complete` says nothing about the project as a whole: an input that could not be read is not attributed to any node. Do not conclude that a project is fully analysed because every listed node is `complete`.
 - A reason states that something was not analysed, not that a dependency is missing.
@@ -432,7 +436,7 @@ On stderr, a command that builds the graph prints, once and before any filtering
 
 #### Using impact in CI
 
-To accept "no impact" only when it is proved, check every condition, not only an empty `impacted_nodes`. The first definition rejects an exploration whose `status` and `gaps` disagree:
+To accept "no impact" only when it is proved, check every condition, not only an empty `impacted_nodes`. The proof covers only the report's `node_types`, which exclude tests by default; add `--node-type` if your check must cover tests too. The first definition rejects an exploration whose `status` and `gaps` disagree:
 
 ```sh
 dlin impact orders -o json -q > impact.json && jq -e --arg id model.orders '
@@ -449,7 +453,7 @@ dlin impact orders -o json -q > impact.json && jq -e --arg id model.orders '
 ' impact.json
 ```
 
-Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds as long as one input is found, and its exit code does not depend on completeness.
+The MCP `proves_no_impact` field uses the same scope and requires a complete exploration. Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds as long as one input is found, and its exit code does not depend on completeness.
 
 You may decide, after checking them, that some reasons do not hide a dependency in your project. To proceed despite them, accept a gap only when every one of its reasons matches a rule you have checked, and reject everything else, including reason and gap types you do not know. For example, to accept calls through the `dbt` namespace:
 

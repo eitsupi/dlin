@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use super::{column_result, page::Page, protocol::McpState};
 use crate::commands::{check_loaded_manifest_freshness, read_seed_schemas};
 use dlin_core::graph;
+use dlin_core::graph::filter::KNOWN_NODE_TYPE_LABELS;
 use dlin_core::graph::types::NodeType;
 use dlin_core::render;
 
@@ -66,10 +67,18 @@ pub(super) fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "get_impact",
-            "description": "Analyse the downstream impact of changing a model: returns the downstream nodes reached through the lineage edges, with their distance and a DAG severity based on node type and materialization. `exploration` says whether the reached set can miss nodes; dependencies read from a manifest are not assessed, so it is incomplete. An empty page of impacted nodes does not show that there is no impact; `proves_no_impact` does.",
+            "description": "Analyse the downstream impact of changing a model: returns the downstream nodes reached through the lineage edges, with their distance and a DAG severity based on node type and materialization. By default the result excludes tests. `exploration` and `proves_no_impact` apply to the selected node types; dependencies read from a manifest are not assessed, so it is incomplete. An empty page of impacted nodes does not show that there is no impact; `proves_no_impact` does.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." } },
+                "properties": {
+                    "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." },
+                    "node_types": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string", "enum": KNOWN_NODE_TYPE_LABELS },
+                        "description": "Select downstream node types. Defaults to all except test. Paths can pass through other types."
+                    }
+                },
                 "required": ["model"],
                 "additionalProperties": false
             }
@@ -315,7 +324,7 @@ fn parse_node_type_filter(args: &Value) -> Result<Option<HashSet<NodeType>>> {
                 let s = v
                     .as_str()
                     .with_context(|| "argument 'node_types' must contain only strings")?;
-                let nt = node_type_from_str(s).with_context(|| {
+                let nt = NodeType::from_resource_label(s).with_context(|| {
                     format!("argument 'node_types' contains unknown value: '{s}'")
                 })?;
                 set.insert(nt);
@@ -323,21 +332,6 @@ fn parse_node_type_filter(args: &Value) -> Result<Option<HashSet<NodeType>>> {
             Ok(Some(set))
         }
         Some(_) => anyhow::bail!("argument 'node_types' must be an array"),
-    }
-}
-
-fn node_type_from_str(s: &str) -> Option<NodeType> {
-    match s {
-        "model" => Some(NodeType::Model),
-        "source" => Some(NodeType::Source),
-        "seed" => Some(NodeType::Seed),
-        "snapshot" => Some(NodeType::Snapshot),
-        "test" => Some(NodeType::Test),
-        "exposure" => Some(NodeType::Exposure),
-        "semantic_model" => Some(NodeType::SemanticModel),
-        "metric" => Some(NodeType::Metric),
-        "saved_query" => Some(NodeType::SavedQuery),
-        _ => None,
     }
 }
 
@@ -475,7 +469,17 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
     let idx = graph::filter::try_resolve_node_quiet(state.dag(), &normalized)
         .with_context(|| format!("model not found: {model}"))?;
-    let report = graph::impact::compute_impact(&state.build, idx)
+    if args.get("node_types").is_some_and(Value::is_null) {
+        anyhow::bail!("argument 'node_types' must be an array");
+    }
+    let scope = parse_node_type_filter(args)?
+        .map(|types| {
+            graph::impact::ImpactScope::new(types)
+                .context("argument 'node_types' must not be empty")
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let report = graph::impact::compute_impact(&state.build, idx, &scope)
         .with_context(|| format!("model not found: {model}"))?;
     let detail = column_result::Detail::parse(args)?;
     // Page through a reordered view; the report itself stays as computed.
@@ -492,11 +496,12 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
         20,
         ordered.len(),
         state.manifest_hash,
-        ("get_impact", &normalized, detail),
+        ("get_impact", &normalized, detail, report.node_types()),
     )?;
     let nodes = &ordered[page.range()];
     let mut value = json!({
-        "source_model":report.source_model, "overall_severity":report.overall_severity,
+        "source_model":report.source_model, "node_types":report.node_types(),
+        "overall_severity":report.overall_severity,
         "affected_models":report.affected_models, "affected_tests":report.affected_tests,
         "affected_exposures":report.affected_exposures,
         "source_node":report.source_node(), "exploration":report.exploration(), "proves_no_impact":report.proves_no_impact(),

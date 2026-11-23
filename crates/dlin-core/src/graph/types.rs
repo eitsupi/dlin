@@ -24,6 +24,25 @@ pub enum NodeType {
 }
 
 impl NodeType {
+    /// Public resource types, in report order.
+    pub const RESOURCE_TYPES: [Self; 9] = [
+        Self::Model,
+        Self::Source,
+        Self::Seed,
+        Self::Snapshot,
+        Self::Test,
+        Self::Exposure,
+        Self::SemanticModel,
+        Self::Metric,
+        Self::SavedQuery,
+    ];
+
+    pub fn from_resource_label(label: &str) -> Option<Self> {
+        Self::RESOURCE_TYPES
+            .into_iter()
+            .find(|kind| kind.label().eq_ignore_ascii_case(label))
+    }
+
     pub fn prefix(&self) -> &'static str {
         match self {
             NodeType::Model => "",
@@ -39,7 +58,7 @@ impl NodeType {
         }
     }
 
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
             NodeType::Model => "model",
             NodeType::Source => "source",

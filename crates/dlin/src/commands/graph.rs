@@ -415,6 +415,7 @@ fn collect_sql_contents(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_impact_command(
     raw_inputs: Vec<String>,
+    node_types: Option<Vec<graph::types::NodeType>>,
     project_dir: &Path,
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
@@ -423,6 +424,13 @@ pub(crate) fn run_impact_command(
     no_cache: bool,
     refresh_cache: bool,
 ) -> Result<()> {
+    let scope = node_types
+        .map(|types| {
+            graph::impact::ImpactScope::new(types)
+                .ok_or_else(|| anyhow::anyhow!("--node-type must not be empty"))
+        })
+        .transpose()?
+        .unwrap_or_default();
     let project_dir = project_dir
         .canonicalize()
         .unwrap_or_else(|_| project_dir.to_path_buf());
@@ -464,7 +472,7 @@ pub(crate) fn run_impact_command(
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(dag, model)?;
-            graph::impact::compute_impact(&build, source_idx)
+            graph::impact::compute_impact(&build, source_idx, &scope)
         })
         .collect();
 
@@ -472,7 +480,12 @@ pub(crate) fn run_impact_command(
         anyhow::bail!("no models found matching: {}", models.join(", "));
     }
 
-    warn_sql_mode_test_limitation(source, reports.iter().any(|r| r.affected_tests > 0));
+    warn_sql_mode_test_limitation(
+        source,
+        reports
+            .iter()
+            .any(|r| r.affected_tests.unwrap_or_default() > 0),
+    );
 
     match output {
         cli::ImpactOutputFormat::Text => {

@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use petgraph::Direction;
 use petgraph::stable_graph::NodeIndex;
 use serde::Serialize;
 
@@ -15,7 +16,7 @@ use crate::graph::dependency::{
     DependencyReason, DependencyReasonCode, InputFailure, InputKind, InputLocation, InputStage,
     NodeDependencyReason, ProjectGap, ProjectScope,
 };
-use crate::graph::types::LineageGraph;
+use crate::graph::types::{LineageGraph, NodeType};
 
 /// The kind of dependency an exploration covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -143,23 +144,30 @@ impl Serialize for Exploration {
 /// Explore the model dependencies of the nodes reached from a source.
 ///
 /// `reached` holds the source and every node reached from it. Only nodes
-/// outside it can be gaps: a dependency hidden in a reached node is an edge
-/// into the reached set, which adds no node to it. A dependency that would
-/// leave the reached set ends at a node outside it, which carries the reason.
+/// outside it can be gaps. On a hidden path to a missed target, the last
+/// missing edge ends at a node that is (or has a known path to) that target.
 ///
 /// Every project gap is a gap, since it is not attributed to a node and may
 /// affect any of them.
 pub(crate) fn explore_model_dependencies(
     graph: &LineageGraph,
     reached: &HashSet<NodeIndex>,
+    node_types: &[NodeType],
     project_gaps: &[ProjectGap],
 ) -> Exploration {
     let mut gaps: Vec<ExplorationGap> = Vec::new();
     let mut scopes: BTreeSet<ProjectScope> = BTreeSet::new();
-    for idx in graph.node_indices() {
-        if reached.contains(&idx) {
-            continue;
-        }
+    let mut pending: Vec<_> = graph
+        .node_indices()
+        .filter(|idx| !reached.contains(idx) && node_types.contains(&graph[*idx].node_type))
+        .collect();
+    let mut relevant: HashSet<_> = pending.iter().copied().collect();
+    while let Some(idx) = pending.pop() {
+        pending.extend(
+            graph
+                .neighbors_directed(idx, Direction::Incoming)
+                .filter(|parent| !reached.contains(parent) && relevant.insert(*parent)),
+        );
         let node = &graph[idx];
         let mut reasons = Vec::new();
         for reason in node.dependency_analysis.unresolved() {

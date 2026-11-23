@@ -491,30 +491,34 @@ It does not prove that the settings are what the user intended.
 
 ### Impact exploration
 
-An impact report lists the nodes reached from the input through the graph's
-edges (`impacted_nodes`). They are reached through observed edges: some
+An impact report lists the selected `node_types` reached from the input
+through the full graph (`impacted_nodes`). Paths and distances can pass
+through intermediate nodes of any type. CLI and MCP default to all public
+resource types except tests. The traversal uses observed edges: some
 edges are guesses (a literal `ref()` under a condition that cannot be
 evaluated, `unsupported_ref_package`, `ambiguous_ref`), so the set may hold
 nodes that are not affected. Its `exploration` judges only whether the set
 can miss a node; it does not confirm individual impacts, distances or paths.
 Separating confirmed from possible impacts needs edge-level certainty.
 
-Let R be the input and the nodes reached from it. The `model_dependency`
-exploration has these gaps:
+Let R be the input and the nodes reached from it, and S the nodes of the
+selected types. A single reverse traversal from S outside R finds the
+unreached nodes that can reach an unreached target through known edges.
+The `model_dependency` exploration has these gaps:
 
-- `unresolved_dependencies`: a node outside R whose analysis has reasons,
-  with those reasons (never empty). A dependency hidden in a node of R is an
-  edge into R and adds no node to it; a hidden dependency that would leave R
-  ends at a node outside R, which carries the reason. Nodes in R are never
-  gaps.
+- `unresolved_dependencies`: a node found by the reverse traversal that
+  has unresolved reasons. On a hidden path to an unreached target, the last
+  missing edge ends at such a node, since the rest of the path is known.
+  An unselected terminal test therefore contributes no node-level gap.
 - `input_skipped`: every skipped input, since it is not attributed to a node.
 - `not_assessed`: a scope that is not assessed, from the project gaps or from
-  a node outside R. Manifest mode passes `manifest_dependencies` as a project
-  gap, so a manifest whose nodes are all in R does not look complete.
+  a node found by the reverse traversal. Manifest mode passes
+  `manifest_dependencies` as a project gap even when all nodes are in R.
   `phantom_dependencies` is never a gap.
 
-`compute_impact` takes a `GraphBuild`, which holds the graph and its project
-gaps together and is made only by `build_graph_report` or
+`compute_impact` takes a nonempty `ImpactScope` and a `GraphBuild`. The
+build holds the graph and project gaps together and is made by
+`build_graph_report` or
 `GraphBuild::from_manifest`, so a caller cannot judge a graph without its
 gaps. Each input is judged with its own R, on the graph before any filtering
 or collapsing. The status is derived from the gaps. An input that is a phantom
@@ -522,8 +526,9 @@ node is not a node of the project: its report keeps the reached nodes but
 has no exploration.
 
 `ImpactReport::proves_no_impact()` holds when `impacted_nodes` is empty and
-at least one `model_dependency` exploration exists and all are complete. An
-empty exploration never counts as complete.
+at least one `model_dependency` exploration exists and all are complete.
+The proof concerns only the selected resource types. An empty exploration
+never counts as complete.
 `ImpactReport::is_acceptable_under(&DependencyPolicy)` holds when every gap
 is accepted by the policy: an `unresolved_dependencies` gap only when it has
 reasons and each of them matches a rule (a reason type and a namespace
