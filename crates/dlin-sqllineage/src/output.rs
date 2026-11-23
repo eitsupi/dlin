@@ -349,6 +349,7 @@ pub enum Unresolved {
         /// query binds.
         present_candidates: Vec<Candidate>,
         /// Candidates whose columns are not known and may carry the name.
+        /// Empty when the possible providers could not be named.
         possible_candidates: Vec<Candidate>,
     },
     /// A column could not be bound to a relation in scope.

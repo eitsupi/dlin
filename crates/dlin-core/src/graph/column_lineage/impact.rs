@@ -105,8 +105,8 @@ pub struct PossibleImpact {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TraceGap {
-    /// A dependent output has unresolved contributions that were not proven
-    /// unrelated to the input.
+    /// The input binding is unresolved, or a dependent output has unresolved
+    /// contributions that were not proven unrelated to the input.
     UnresolvedLineage {
         at: ModelOutputRef,
         reasons: Vec<UnresolvedReason>,
@@ -464,6 +464,32 @@ pub(super) fn compute_column_impact(
     };
     if let Some(output) = &initial.output {
         merge_evidence(&mut explored, &identification_evidence(output));
+    }
+    if let Some(slot) = start_slot {
+        let unresolved = slot.lineage.unresolved();
+        // The slot can be listed even when the reference producing its value
+        // has no proven binding. Keep that diagnostic on the requested input.
+        let binding_errors = initial.errors.iter().filter(|error| {
+            error.slot() == Some(slot.id)
+                && (error.kind == ColumnLineageErrorKind::ColumnAmbiguous
+                    || error.kind == ColumnLineageErrorKind::ColumnIndeterminate
+                        && unresolved.iter().any(|contribution| {
+                            matches!(contribution.reason, UnresolvedReason::Unverified { .. })
+                        }))
+        });
+        for error in binding_errors {
+            errors.push(error.clone());
+        }
+        if !errors.is_empty() {
+            let mut reasons: Vec<_> = unresolved.iter().map(|item| item.reason.clone()).collect();
+            reasons.sort();
+            reasons.dedup();
+            gaps.insert(TraceGap::UnresolvedLineage {
+                at: slot_ref(&initial_uid, &initial.model, slot),
+                reasons,
+            });
+            merge_evidence(&mut explored, &slot.evidence.lineage);
+        }
     }
     // Each queue entry carries its own path-local set of visited (uid, slot)
     // pairs. This allows a node to be processed once per unique path leading to it, while
@@ -1106,6 +1132,11 @@ fn unresolved_relevance(
                 .iter()
                 .map(|candidate| candidate_relevance(candidate, column, &named)),
         ),
+        // A field or expression star can compete without naming a relation.
+        UnresolvedReason::Unverified {
+            possible_candidates,
+            ..
+        } if possible_candidates.is_empty() => RelationRelevance::Unknown,
         UnresolvedReason::Unverified {
             column,
             present_candidates,

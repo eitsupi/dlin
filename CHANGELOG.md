@@ -11,6 +11,10 @@
 
 - Select downstream resource types with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. Traversal uses the full graph in both SQL and manifest mode.
 
+### Bug Fixes
+
+- Column references that may overlap an unexpanded star now report partial lineage with a nonfatal diagnostic. Known duplicate names still cause an ambiguity error, including repeated star projections and join keys exposed by qualified stars.
+
 ## [0.3.0-beta.1] - 2026-11-22
 
 ### Breaking Changes

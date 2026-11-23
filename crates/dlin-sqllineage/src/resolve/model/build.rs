@@ -464,7 +464,24 @@ impl<'a, 'c, 's> OutputModels<'a, 'c, 's> {
                     reads.push((range.index, model));
                 }
                 schema.extend(&self.binding_schema(&range.binding));
-                self.binding_part(&range)
+                let mut elements = self.binding_part(&range);
+                if !graph.scopes.join_merges(env).is_empty() {
+                    let input = self.input(env);
+                    let keys = input
+                        .qualified_keys
+                        .iter()
+                        .filter(|(index, _)| *index == range.index)
+                        .map(|(_, key)| key.clone())
+                        .collect::<Vec<_>>();
+                    if !keys.is_empty() {
+                        super::join::apply_qualified_keys(&mut elements, keys, graph.dialect);
+                        for element in &mut elements {
+                            element.rely_on(&input.model.schema);
+                        }
+                        schema.extend(&input.model.schema);
+                    }
+                }
+                elements
             }
             StarTarget::Unknown(table) => {
                 schema.add(&table);

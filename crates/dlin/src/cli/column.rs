@@ -113,7 +113,8 @@ Output format (-o/--output):
                 diagnostic and a difference between the YAML columns and the
                 SQL output are non-fatal and do not change the exit code;
                 model-level, missing-column, ambiguous, and parse diagnostics
-                are fatal (exit code 1).
+                are fatal (exit code 1). A possible overlap with an
+                unexpanded star is indeterminate and nonfatal.
   plain           human-readable text, one model per block. An \"assumes\" line
                   names each assumed column list (a YAML list taken as
                   exhaustive, or an enforced contract) and the columns that

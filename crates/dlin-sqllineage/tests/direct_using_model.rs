@@ -4,8 +4,8 @@
 use std::borrow::Cow;
 
 use dlin_sqllineage::{
-    Analyzer, Candidate, Catalog, CatalogColumn, CatalogEntry, Dialect, Ident, Lineage, Relation,
-    Severity, Unresolved,
+    Analyzer, Candidate, Catalog, CatalogColumn, CatalogEntry, Dialect, Ident, Lineage, OutputName,
+    Relation, Severity, Unresolved,
 };
 
 fn relation(name: &str) -> Relation {
@@ -417,4 +417,133 @@ fn inherited_duplicate_range_ambiguity_follows_the_outer_join_kind() {
             "{sql}"
         );
     }
+}
+
+#[test]
+fn qualified_using_stars_publish_each_side_key_where_the_dialect_exposes_it() {
+    let sql = r#"
+        WITH c AS (SELECT 2 AS flag),
+        e AS (
+            SELECT a.*, c.flag
+            FROM (SELECT * FROM unk_a) a
+            JOIN (SELECT * FROM unk_b) b USING (flag)
+            CROSS JOIN c
+        )
+        SELECT flag FROM e
+    "#;
+    for dialect in [
+        Dialect::BigQuery,
+        Dialect::PostgreSql,
+        Dialect::DuckDb,
+        Dialect::Spark,
+        Dialect::Databricks,
+        Dialect::SQLite,
+    ] {
+        let report = Analyzer::new(dialect)
+            .analyze(sql)
+            .unwrap()
+            .into_single()
+            .unwrap();
+        assert!(
+            matches!(
+                &report.output.columns[0].lineage,
+                Lineage::Partial { known, unresolved }
+                    if known.is_empty() && matches!(unresolved.as_slice(), [Unresolved::Ambiguous { .. }])
+            ),
+            "{dialect}: {:?}",
+            report.output.columns
+        );
+    }
+    let report = Analyzer::new(Dialect::Trino)
+        .analyze(sql)
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert_eq!(report.output.columns[0].lineage, Lineage::Complete(vec![]));
+}
+
+#[test]
+fn qualified_stars_keep_input_side_and_do_not_claim_a_key_position() {
+    let report = Analyzer::new(Dialect::PostgreSql)
+        .analyze(r#"SELECT a.*, b.* FROM left_table a JOIN right_table b USING (id)"#)
+        .unwrap()
+        .into_single()
+        .unwrap();
+    let outputs = &report.output.columns;
+    assert_eq!(outputs.len(), 2);
+    for (column, source) in outputs.iter().zip(["left_table", "right_table"]) {
+        assert_eq!(column.name, OutputName::Explicit(Ident::unquoted("id")));
+        assert_eq!(column.ordinal, None);
+        assert!(matches!(&column.lineage, Lineage::Complete(sources)
+            if sources.len() == 1 && sources[0].relation.name.value == source));
+    }
+    assert!(matches!(
+        report.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
+}
+
+#[test]
+fn merged_using_key_competes_even_if_neither_side_has_a_known_value_binding() {
+    let report = Analyzer::new(Dialect::BigQuery)
+        .analyze(
+            r#"
+        WITH a AS (SELECT l.*, r.* FROM unk_l l CROSS JOIN unk_r r),
+        b AS (SELECT l.*, r.* FROM unk_x l CROSS JOIN unk_y r),
+        c AS (SELECT 2 AS flag)
+        SELECT flag FROM a JOIN b USING (flag) CROSS JOIN c
+    "#,
+        )
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert!(
+        matches!(
+            &report.output.columns[0].lineage,
+            Lineage::Partial { known, unresolved }
+                if known.is_empty() && matches!(unresolved.as_slice(), [Unresolved::Ambiguous { .. }])
+        ),
+        "{:?}",
+        report.output.columns
+    );
+}
+
+#[test]
+fn qualified_natural_stars_observe_only_proven_shared_keys() {
+    let report = Analyzer::new(Dialect::PostgreSql)
+        .analyze(
+            r#"
+        SELECT a.* FROM (SELECT 1 AS id, 2 AS x) a
+        NATURAL JOIN (SELECT 1 AS id) b
+    "#,
+        )
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert_eq!(
+        report
+            .output
+            .columns
+            .iter()
+            .map(|column| &column.name)
+            .collect::<Vec<_>>(),
+        [
+            &OutputName::Explicit(Ident::unquoted("id")),
+            &OutputName::Explicit(Ident::unquoted("x"))
+        ]
+    );
+    let report = Analyzer::new(Dialect::PostgreSql)
+        .analyze(
+            r#"
+        SELECT a.* FROM unknown a NATURAL JOIN (SELECT 1 AS id) b
+    "#,
+        )
+        .unwrap()
+        .into_single()
+        .unwrap();
+    assert!(report.output.columns.is_empty());
+    assert!(matches!(
+        report.output.shape,
+        dlin_sqllineage::Shape::Open { .. }
+    ));
 }

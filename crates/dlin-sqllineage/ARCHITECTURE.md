@@ -446,7 +446,8 @@ four other things:
 | Situation | Representation |
 | --- | --- |
 | Unknown schema (star over a relation without a catalog) | Open shape with an unknown segment for that relation, not `Unsupported` |
-| Name ambiguity | `Ambiguous` |
+| Proven name ambiguity | `Ambiguous` |
+| Name binding depends on unenumerated columns | `Unverified` |
 | Set-operation correspondence cannot be proven | Alignment-unknown contribution |
 | Parse failure | A failed input, not an empty or `C[]` output |
 
@@ -492,6 +493,15 @@ AS j(a)`, makes the join one range variable `j` over the join's merged output.
 The relations inside it are hidden from the rest of the query, and its column
 alias list applies after the join's columns are merged. A parenthesized join
 without an alias keeps its relations visible.
+
+A successful `USING` fold establishes one output key, even when its value
+sources are uncertain. It also establishes the key for a qualified star of
+an input range when that range supplies the key. A compound input with
+several possible providers does not establish the key for each individual
+range. A key exposed by a qualified star keeps that side's value and an
+unknown ordinal when its position is not known. `NATURAL` establishes only
+keys known to be shared. Trino exposes merged keys through the join output
+and omits them from the input-qualified stars. [Trino's join resolution explanation](https://github.com/trinodb/trino/issues/29696)
 
 PostgreSQL, Snowflake and Generic apply this prefix rule and reject a proven excess of
 aliases as unresolved. Generic is the engine's permissive SQL policy, rather
@@ -575,7 +585,7 @@ relies on are kept apart.
   contradicts the old, is not a refinement. Results may change arbitrarily (E5).
 
 Preservation is not unconditional even for an update that adds knowledge. Adding
-a relation to the query can make an unqualified name ambiguous (I2), so it is not
+a relation to the query can leave an unqualified name unverified (I2), so it is not
 a refinement.
 
 **CTE and model split equivalence.** Writing a `WITH` clause in one model and
@@ -645,7 +655,7 @@ proven.
 | --- | --- | --- | --- | --- |
 | P1 | PostgreSQL | `SELECT t.x FROM t` | `Partial t{x}` | `x` = `C[t.x]`, Closed. Partial catalog evidence is referenced |
 | P2 | PostgreSQL | `SELECT * FROM t` | `Partial t{x}` | Listed `x` = `C[t.x]`, `ordinal` is `None`. Shape is Open with an unknown segment `BehindStar(t)`. Not Closed just because `x` is listed |
-| P3 | PostgreSQL | `SELECT x FROM a CROSS JOIN b` | `FullOrdered a[x]`, `Partial b{y}` | `x` = `P[[]; [Ambiguous(x, [a, b])]]`, Closed. That `b` does not list `x` is not proof that `b` has no `x` |
+| P3 | PostgreSQL | `SELECT x FROM a CROSS JOIN b` | `FullOrdered a[x]`, `Partial b{y}` | `x` = `P[[]; [Unverified(x, present=[a], possible=[b])]]`, Closed. That `b` does not list `x` is not proof that `b` has no `x` |
 | P4 | PostgreSQL | `SELECT * FROM a NATURAL JOIN b` | `FullOrdered a[x]`, `Partial b{y}` | Open. It is not known whether `x` is a merged join key or an unmerged column. The result must not claim a known single column and must keep this uncertainty. It needs a schema-dependent unresolved contribution, which a plain unknown star cannot express |
 
 ### Schema evidence
@@ -713,7 +723,7 @@ table in section 1 states.
 | U2 | PostgreSQL | `SELECT * FROM t` | no catalog | Open with `BehindStar(t)`. Not `Unsupported` |
 | U3 | PostgreSQL | `SELECT x FROM s UNION ALL TABLE t` | none | `TABLE t` is `SELECT * FROM t`. Keeps the known `s.x` and adds the alignment reason of the unknown star over `t`, not `Unsupported`. `t` is included among the relations read |
 | U4 | PostgreSQL | `SELECT (` | none | Parse failure. Not a successful empty output and not `C[]` |
-| U5 | PostgreSQL | `SELECT j.z, x FROM t, JSON_TABLE(t.y, '$' COLUMNS (z INT PATH '$.z')) AS j` | `t(x, y)`, exhaustive | `z` = `P[[]; [Unsupported(JSON_TABLE)]]`. `x` = `P[[]; [Ambiguous(t, j), Unsupported(JSON_TABLE)]]`, because `j` may carry `x`. Closed. `t` is read; `t.y` is not in the value lineage |
+| U5 | PostgreSQL | `SELECT j.z, x FROM t, JSON_TABLE(t.y, '$' COLUMNS (z INT PATH '$.z')) AS j` | `t(x, y)`, exhaustive | `z` = `P[[]; [Unsupported(JSON_TABLE)]]`. `x` = `P[[]; [Unverified(x, present=[t], possible=[j]), Unsupported(JSON_TABLE)]]`, because `j` may carry `x`. Closed. `t` is read; `t.y` is not in the value lineage |
 | U6 | PostgreSQL | `SELECT * FROM t, LATERAL (VALUES (t.x)) AS j` | `t(x, y)`, exhaustive | `x` = `C[t.x]`, `y` = `C[t.y]`, then an unknown segment with `Unsupported(VALUES)`. Open, not Closed with the segment dropped |
 | U7 | PostgreSQL | `SELECT * FROM (VALUES (1), (2, 3)) AS v` | none | Failure with a `VALUES` row arity diagnostic. Not a successful empty output |
 
@@ -722,7 +732,7 @@ table in section 1 states.
 | ID | Dialect | Compared inputs | Expected relation |
 | --- | --- | --- | --- |
 | I1 | PostgreSQL | K3 without metadata, then K4 with the ordered catalog. Also E1, then E4 | Every previous `known` source is in the new `known`, whether or not the evidence id or fingerprint changed. A previous `known` containing `t2.b` is a failure |
-| I2 | PostgreSQL | `SELECT x FROM a`, then `SELECT x FROM a CROSS JOIN b`, both with unknown schemas | The first may resolve `x` to `a`. The second is `Ambiguous`. Preserving `known` is not required, because adding a relation is not a refinement |
+| I2 | PostgreSQL | `SELECT x FROM a`, then `SELECT x FROM a CROSS JOIN b`, both with unknown schemas | The first may resolve `x` to `a`. The second is `Unverified`, with both relations as possible providers. Preserving `known` is not required, because adding a relation is not a refinement |
 | I3 | PostgreSQL | `WITH m AS (SELECT z, a FROM raw.t) SELECT m.z FROM m`, and the same `SELECT` split into a separate model `m` | Same terminal value lineage and completeness, given the same dialect, column schema, aliases and value semantics. Model path and evidence kind are normalized before comparing |
 | I4 | PostgreSQL | One analysis result before and after being stored in the cache, then after its evidence changes | The round trip preserves all information. A cache hit after an evidence change is not allowed |
 | I5 | PostgreSQL | `SELECT d.x FROM t CROSS JOIN LATERAL (SELECT x) AS d`, then the same query with `CROSS JOIN u` appended after the `LATERAL` item. Catalog `t(x)`, `u(x)` | Both give `d.x` = `C[t.x]`. The inner `x` sees `t` only, so `u` is not a candidate and the name is not `Ambiguous`. The second query also reads `u` |

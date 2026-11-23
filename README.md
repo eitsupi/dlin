@@ -325,6 +325,8 @@ customers (2 columns listed: 2 complete, 0 partial)
 
 Each column's lineage is `complete`, or `partial` when some contributions could not be resolved. A partial column keeps its known sources and lists the unresolved parts with a reason (for example a column hidden behind an unexpanded `SELECT *`, an ambiguous name, or unsupported syntax).
 
+When an unexpanded star may also provide a column name, the unresolved binding is nonfatal. A known ambiguity still produces exit code 1.
+
 A `boundary` line says where tracing stopped and why. Reaching a source, seed or other external relation, or a constant, is a legitimate end. A model that failed analysis, a missing definition, a cycle, an ambiguous model name or a snapshot is an incomplete stop, and the column stays partial.
 
 An `assumes` line names a schema the result relies on without proof. By default, a column list declared in YAML is taken as the full list of columns, and the line shows which conclusions depend on that.

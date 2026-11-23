@@ -734,3 +734,122 @@ select col_a, col_b, flag from expanded"#,
         assert_eq!(report["errors"], serde_json::json!([]), "{report}");
     }
 }
+
+#[test]
+fn unknown_field_star_overlap_is_nonfatal_across_models() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "uncertain",
+            r#"with expanded as (select s.item.*, 2 as flag from src s) select flag from expanded"#,
+            &[],
+        ),
+        (
+            "reader",
+            r#"select flag as renamed from `p`.`d`.`uncertain`"#,
+            &["uncertain"],
+        ),
+        (
+            "duplicate",
+            r#"with expanded as (select s.item.*, 2 as flag, 3 as flag from src s) select flag from expanded"#,
+            &[],
+        ),
+    ]);
+    let (status, reports) = column_upstream_json(&tmp, &["uncertain", "reader"]);
+    assert_eq!(status.code(), Some(0), "{reports}");
+    for (model, column) in [("uncertain", "flag"), ("reader", "renamed")] {
+        let lineage = column_lineage(&reports, model, column);
+        assert_eq!(lineage["status"], "partial", "{lineage}");
+        assert_eq!(
+            lineage["unresolved"][0]["reason"]["kind"], "unverified",
+            "{lineage}"
+        );
+    }
+    for report in reports.as_array().unwrap() {
+        assert!(
+            report["errors"].as_array().unwrap().iter().any(|error| {
+                error["kind"] == "column_indeterminate"
+                    && error["what"].as_str().unwrap().contains("unexpanded star")
+            }),
+            "{report}"
+        );
+    }
+    let (status, reports) = column_upstream_json(&tmp, &["duplicate"]);
+    assert_eq!(status.code(), Some(1), "{reports}");
+    assert_eq!(
+        reports[0]["errors"][0]["kind"], "column_ambiguous",
+        "{reports}"
+    );
+}
+
+#[test]
+fn downstream_preserves_the_requested_columns_binding_diagnostic() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "uncertain",
+            r#"with expanded as (select s.item.*, 2 as flag from src s) select flag from expanded"#,
+            &[],
+        ),
+        (
+            "duplicate",
+            r#"with expanded as (select s.item.*, 2 as flag, 3 as flag from src s) select flag from expanded"#,
+            &[],
+        ),
+    ]);
+    for (model, code, kind) in [
+        ("uncertain", 0, "column_indeterminate"),
+        ("duplicate", 1, "column_ambiguous"),
+    ] {
+        let output = Command::new(binary_path())
+            .args([
+                "column",
+                "downstream",
+                model,
+                "--column",
+                "flag",
+                "-o",
+                "json",
+                "--no-cache",
+                "--manifest-path",
+            ])
+            .arg(tmp.path().join("target/manifest.json"))
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.code(), Some(code), "{reports}");
+        assert_eq!(reports[0]["errors"][0]["kind"], kind, "{reports}");
+        assert_eq!(
+            reports[0]["exploration"][0]["status"], "incomplete",
+            "{reports}"
+        );
+    }
+}
+
+#[test]
+fn repeated_projections_and_qualified_using_keys_are_fatal_ambiguities() {
+    let tmp = bigquery_manifest_dir(&[
+        (
+            "repeated_projection",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.flag, c.flag, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+            &[],
+        ),
+        (
+            "repeated_star",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT c.*, c.*, s.item.* FROM c CROSS JOIN src AS s) SELECT flag FROM e"#,
+            &[],
+        ),
+        (
+            "qualified_using",
+            r#"WITH c AS (SELECT 2 AS flag), e AS (SELECT a.*, c.flag FROM (SELECT * FROM unk_a) a JOIN (SELECT * FROM unk_b) b USING (flag) CROSS JOIN c) SELECT flag FROM e"#,
+            &[],
+        ),
+    ]);
+    for model in ["repeated_projection", "repeated_star", "qualified_using"] {
+        let (status, reports) = column_upstream_json(&tmp, &[model]);
+        assert_eq!(status.code(), Some(1), "{model}: {reports}");
+        assert_eq!(
+            reports[0]["errors"][0]["kind"], "column_ambiguous",
+            "{model}: {reports}"
+        );
+    }
+}

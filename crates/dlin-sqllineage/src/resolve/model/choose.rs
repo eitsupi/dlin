@@ -5,9 +5,8 @@
 //! publish it. Providers are the enumerated columns that carry the name and the
 //! unknown segments whose name conditions still admit it; a relation whose
 //! catalog columns lack the name, or a CTE or derived table that lists no such
-//! column and has no unknown segment, is not a provider. Several providers make
-//! the name ambiguous, whichever of them list the column and whichever may
-//! merely hide it behind a star.
+//! column and has no unknown segment, is not a provider. Several providers can
+//! leave a name unverified when one or more could hide it behind a star.
 //!
 //! The same function answers a reference in a FROM clause and a reference to a
 //! column of a scope, because both read a model's elements: a scope that reads a
@@ -37,15 +36,11 @@ pub(in crate::resolve) struct Ambiguity {
     /// The enumerated columns among the providers, which decide the transform
     /// of a value that is read through the ambiguity.
     pub listed: Vec<usize>,
-    /// Whether the name has no single owner whatever the columns that are not
-    /// known turn out to be: a join over duplicated range variables, or a
-    /// provider that is ambiguous about the name itself. Otherwise the
-    /// providers compete, and only `present` are known to publish the name.
+    /// Whether the providers already establish a conflict.
     pub certain: bool,
     /// The candidates known to publish the name.
     pub present: Vec<Candidate>,
-    /// How many providers are known to publish the name. Two make the name
-    /// ambiguous whatever the others carry.
+    /// How many providers are known to publish the name.
     pub known: usize,
     /// Whether one of them is a column the model defines itself, which has
     /// no range variable to name it: the scope that is read stands for it.
@@ -121,7 +116,7 @@ impl OutputModel {
         indexes.sort_unstable();
 
         let mut units: Vec<Unit> = Vec::new();
-        let mut collapsed: Vec<(usize, usize)> = Vec::new();
+        let mut collapsed: Vec<(usize, &Ident, usize)> = Vec::new();
         for index in indexes {
             let (ranges, merged) = match &self.elements[index] {
                 OutputElement::Column(slot) => (&slot.ranges, &slot.candidate_ranges),
@@ -130,12 +125,17 @@ impl OutputModel {
             let asked = asked_name(&self.elements[index], name);
             let listed = matches!(self.elements[index], OutputElement::Column(_));
             // The elements of a CTE or derived table are weighed by the model
-            // they were forwarded from, so one relation is one provider no
-            // matter how many elements it contributes.
+            // they were forwarded from. Group only occurrences of the same
+            // source name. Each listed projection still contributes a slot.
             if let [range] = &**ranges
+                && let Some(asked) = asked
                 && let Some((_, child)) = self.reads.iter().find(|(at, _)| *at == range.index)
             {
-                if let Some(&(_, at)) = collapsed.iter().find(|(owner, _)| *owner == range.index) {
+                if let Some(&(_, _, at)) = collapsed.iter().find(|(owner, source, _)| {
+                    *owner == range.index
+                        && source.column_key(self.names.dialect)
+                            == asked.column_key(self.names.dialect)
+                }) {
                     units[at].elements.push(index);
                     continue;
                 }
@@ -145,10 +145,9 @@ impl OutputModel {
                 // a segment, is the reader's. An element the reader defines
                 // asks nothing and is its own provider.
                 let own = || Unit::own(index, range.candidate().into_iter().collect(), listed);
-                let unit = match asked.map(|asked| child.choose(asked)) {
-                    None => Some(own()),
-                    Some(Choice::Absent) => None,
-                    Some(Choice::Ambiguous(inner)) => Some(match child.unverified(&inner) {
+                let unit = match child.choose(asked) {
+                    Choice::Absent => None,
+                    Choice::Ambiguous(inner) => Some(match child.unverified(&inner) {
                         // The relation leaves the name to columns it does not
                         // know, and so does its reader. A column it defines
                         // itself is read as the range's.
@@ -160,7 +159,7 @@ impl OutputModel {
                                 }
                                 present.iter().chain(&possible).cloned().collect()
                             },
-                            known: !present.is_empty(),
+                            known: inner.known > 0,
                             present,
                             ambiguous: false,
                             uncertain: true,
@@ -174,10 +173,10 @@ impl OutputModel {
                             uncertain: false,
                         },
                     }),
-                    Some(Choice::Column(..) | Choice::Possible(..)) => Some(own()),
+                    Choice::Column(..) | Choice::Possible(..) => Some(own()),
                 };
                 if let Some(unit) = unit {
-                    collapsed.push((range.index, units.len()));
+                    collapsed.push((range.index, asked, units.len()));
                     units.push(unit);
                     continue;
                 }
@@ -216,9 +215,6 @@ impl OutputModel {
                     unit.ambiguous = true;
                 }
             }
-            if unit.uncertain {
-                unit.known = !unit.present.is_empty();
-            }
             units.push(unit);
         }
 
@@ -254,8 +250,19 @@ impl OutputModel {
         let mut candidates = Vec::new();
         let mut listed = Vec::new();
         let mut present: Vec<Candidate> = Vec::new();
-        let certain = units.iter().any(|unit| unit.ambiguous);
-        let known = units.iter().filter(|unit| unit.known).count();
+        let known = units
+            .iter()
+            .map(|unit| {
+                let listed = unit
+                    .elements
+                    .iter()
+                    .filter(|&&index| matches!(self.elements[index], OutputElement::Column(_)))
+                    .count();
+                listed.max(usize::from(unit.known))
+            })
+            .sum();
+        let possible = units.iter().any(|unit| !unit.known || unit.uncertain);
+        let certain = known > 1 || !possible || units.iter().any(|unit| unit.ambiguous);
         let defined = units
             .iter()
             .any(|unit| unit.known && unit.candidates.is_empty());
@@ -335,7 +342,7 @@ impl OutputModel {
         &self,
         ambiguity: &Ambiguity,
     ) -> Option<(Vec<Candidate>, Vec<Candidate>)> {
-        if ambiguity.certain || ambiguity.known > 1 || self.has_alternative_ranges() {
+        if ambiguity.certain || self.has_alternative_ranges() {
             return None;
         }
         let present = ambiguity.present.clone();
@@ -345,7 +352,8 @@ impl OutputModel {
                 possible.push(candidate.clone());
             }
         }
-        (!possible.is_empty()).then_some((present, possible))
+        // A field or expression star may have no relation candidate to name.
+        Some((present, possible))
     }
 
     /// Whether two ranges share a name.

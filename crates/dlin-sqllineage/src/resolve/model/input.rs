@@ -115,6 +115,7 @@ pub(in crate::resolve) struct InputModel {
     /// The folded relations of the FROM clause, then the columns of the
     /// derived tables without a range variable.
     pub(super) model: OutputModel,
+    pub(super) qualified_keys: Vec<(usize, Ident)>,
 }
 
 /// What an unqualified name denotes among the relations of a FROM clause.
@@ -472,6 +473,7 @@ impl OutputModels<'_, '_, '_> {
         if self.enter(CacheKey::Input(env)) {
             return Rc::new(InputModel {
                 model: OutputModel::opaque(OpaqueReason::Recursive, self.graph.dialect),
+                qualified_keys: Vec::new(),
             });
         }
         let model = Rc::new(self.build_input(env));
@@ -735,12 +737,15 @@ impl OutputModels<'_, '_, '_> {
                 candidates: candidates_of(&ranges),
             })));
         }
-        let elements = fold_join_columns(groups, merges, dialect);
+        let (elements, qualified_keys) = fold_join_columns(groups, merges, dialect);
         let mut model = OutputModel::new(elements, Vec::new(), dialect);
         model.invalid = invalid;
         model.reads = reads;
         model.schema = schema;
-        InputModel { model }
+        InputModel {
+            model,
+            qualified_keys,
+        }
     }
 
     /// The model of the CTE or derived table a binding reads, if it is one.

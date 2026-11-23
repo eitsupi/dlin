@@ -407,7 +407,7 @@ fn star_aliases_require_proven_catalog_order() {
                 if known.is_empty()
                     && !unresolved.is_empty()
                     && unresolved.iter().all(|reason| matches!(reason,
-                        Unresolved::Ambiguous { .. }
+                        Unresolved::Unverified { .. }
                             | Unresolved::Unsupported { what: "column alias position unknown" }
                     ))
         ),
