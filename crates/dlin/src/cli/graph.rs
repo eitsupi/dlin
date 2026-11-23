@@ -58,7 +58,7 @@ detail on fewer endpoint nodes.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-File paths are resolved to model names using dbt project configuration.
+SQL paths select a node by unique ID. YAML paths expand to resource names.
 
 Column-level analysis:
   This command works at the model level (bidirectional, with -u/-d depth control).
@@ -125,6 +125,9 @@ Examples:
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
+    /// Focused SQL queries report upstream consumer and project gaps before output filtering.
+    /// JSON includes exploration; other formats report gaps on stderr. Absence does not prove completeness.
+    /// Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
     pub model: Vec<String>,
 
     /// Path to dbt project directory

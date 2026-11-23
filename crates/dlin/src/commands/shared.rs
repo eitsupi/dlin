@@ -42,6 +42,59 @@ fn is_verbose() -> bool {
     VERBOSE.load(Ordering::Relaxed)
 }
 
+pub(super) fn warn_upstream_exploration(exploration: Option<&graph::exploration::Exploration>) {
+    let Some(exploration) = exploration.filter(|_| !dlin_core::is_quiet()) else {
+        return;
+    };
+    dlin_core::warn!(
+        "upstream lineage exploration is incomplete ({} gap(s))",
+        exploration.gaps().len()
+    );
+    if !is_verbose() {
+        return;
+    }
+    use graph::exploration::ExplorationGap;
+    let name = |value: serde_json::Value| value.as_str().unwrap_or_default().replace('_', " ");
+    for gap in exploration.gaps() {
+        match gap {
+            ExplorationGap::UnresolvedDependencies {
+                unique_id,
+                depth: Some(depth),
+                reasons,
+            } => {
+                let codes: std::collections::BTreeSet<_> = reasons
+                    .iter()
+                    .map(|reason| reason.reason_code().as_str())
+                    .collect();
+                dlin_core::warn!(
+                    "upstream dependency gap at {unique_id} (depth {depth}): {}",
+                    codes.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            ExplorationGap::InputSkipped {
+                location,
+                stage,
+                failure,
+                ..
+            } => {
+                dlin_core::warn!(
+                    "upstream exploration skipped input {} at the {} step ({})",
+                    location.path,
+                    name(serde_json::json!(stage)),
+                    name(serde_json::json!(failure)),
+                );
+            }
+            ExplorationGap::NotAssessed { scope } => {
+                dlin_core::warn!(
+                    "upstream exploration did not assess the {}",
+                    name(serde_json::json!(scope))
+                );
+            }
+            ExplorationGap::UnresolvedDependencies { depth: None, .. } => {}
+        }
+    }
+}
+
 /// Build the lineage DAG from either a manifest file or by parsing SQL
 /// files, and report the manifest load warnings and the dependency
 /// analysis on stderr once.

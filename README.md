@@ -390,6 +390,14 @@ These synthetic results use artifacts derived from the real dbt fixture. Each ti
 
 ## Key subcommands
 
+For `graph`, `list`, and `impact`, an exact unique ID takes precedence. A short name prefers models when other node types share the name. If multiple candidates remain, the command reports their IDs and asks you to specify one. `--node-type` filters the output, and `--select` matches a set of nodes.
+
+Focused SQL graph queries can report `exploration.status: "incomplete"` with upstream `gaps`. Consumer gaps give the node ID, its shortest depth from a focus, and the reasons. Consumers at the depth limit are excluded. Project gaps include skipped inputs and have no consumer or depth. Output filters do not hide diagnostics. Text formats summarize gaps on stderr, with details under `--verbose`.
+
+MCP `get_lineage` uses the same format. Manifest queries use the declared dependencies. The absence of `exploration` does not prove completeness.
+
+An SQL file path selects the node with that file path by unique ID, even when other packages have a model with the same name. If multiple nodes share the path, dlin reports their IDs so you can select one. YAML paths expand to resource names.
+
 ### `list`
 
 ```sh
@@ -457,7 +465,7 @@ dlin impact orders -o json -q > impact.json && jq -e --arg id model.orders '
 ' impact.json
 ```
 
-The MCP `proves_no_impact` field uses the same scope and requires a complete exploration. Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds as long as one input is found, and its exit code does not depend on completeness.
+The MCP `proves_no_impact` field uses the same scope and requires a complete exploration. Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds when at least one input is found and no input is ambiguous. Its exit code does not depend on completeness.
 
 You may decide, after checking them, that some reasons do not hide a dependency in your project. To proceed despite them, accept a gap only when every one of its reasons matches a rule you have checked, and reject everything else, including reason and gap types you do not know. For example, to accept calls through the `dbt` namespace:
 
@@ -504,7 +512,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 
 A reason does not establish that an edge is wrong or that one is missing. Literal `ref()` calls under a condition dlin cannot evaluate still produce edges, so `impacted_nodes` may include nodes that are not affected.
 
-A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is a gap of every exploration that ran.
+A skipped input (`input_skipped`: a file that could not be listed, read or parsed) belongs to no node. Besides the dependencies it holds, it can change how names and macros resolve elsewhere, so it is included in impact and in focused graph queries that can traverse upstream.
 
 ## Filtering
 

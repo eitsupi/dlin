@@ -6,29 +6,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::error::DbtLineageError;
 
+use super::dependency::{DependencyReason, NotAssessedScope, ProjectGap, ProjectScope};
+use super::exploration::{Exploration, ExplorationGap, ExplorationKind, project_exploration_gaps};
 use super::types::*;
 
-/// Result of a node name lookup.
-#[derive(Debug)]
-enum NodeLookupResult {
-    /// No matching node found.
-    NotFound,
-    /// Exactly one node matched at the highest-priority lookup stage.
-    Found(NodeIndex),
-    /// Multiple nodes matched at the highest-priority lookup stage. The first
-    /// is selected deterministically, and all matching canonical unique_ids
-    /// are returned for caller-side warnings.
-    Ambiguous(NodeIndex, Vec<String>),
-}
-
-/// Find a node by name using the compatibility lookup precedence:
-/// canonical ID, alias (including the bare model-name shorthand), display
-/// label, then canonical ID suffix. Each stage is evaluated independently and
-/// a lower-priority stage is not consulted once a higher stage has matches.
-fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
+/// Resolve a name with canonical ID, alias, label, and ID suffix precedence.
+/// At the first matching stage, a bare name prefers model candidates.
+pub fn find_node_by_name(graph: &LineageGraph, name: &str) -> Result<Option<NodeIndex>> {
     let canonical = collect_matches(graph, |node| node.unique_id == name);
     if !canonical.is_empty() {
-        return lookup_result(graph, canonical);
+        return lookup_result(graph, name, canonical, false);
     }
 
     let aliases = collect_matches(graph, |node| {
@@ -37,20 +24,21 @@ fn find_node_by_name(graph: &LineageGraph, name: &str) -> NodeLookupResult {
             .flat_map(|alias| alias_spellings(alias))
             .any(|spelling| spelling == name)
     });
+    let prefer_model = !name.contains('.');
     if !aliases.is_empty() {
-        return lookup_result(graph, aliases);
+        return lookup_result(graph, name, aliases, prefer_model);
     }
 
     let labels = collect_matches(graph, |node| node.label == name);
     if !labels.is_empty() {
-        return lookup_result(graph, labels);
+        return lookup_result(graph, name, labels, prefer_model);
     }
 
     let suffix = format!(".{name}");
     let suffix_matches = collect_matches(graph, |node| {
         node.node_type != NodeType::Phantom && node.unique_id.ends_with(&suffix)
     });
-    lookup_result(graph, suffix_matches)
+    lookup_result(graph, name, suffix_matches, prefer_model)
 }
 
 fn alias_spellings(alias: &str) -> impl Iterator<Item = &str> {
@@ -65,72 +53,67 @@ fn collect_matches(
     graph: &LineageGraph,
     mut predicate: impl FnMut(&NodeData) -> bool,
 ) -> Vec<NodeIndex> {
-    let mut matches: Vec<NodeIndex> = graph
+    graph
         .node_indices()
         .filter(|&idx| predicate(&graph[idx]))
-        .collect();
-    matches.sort_by(|left, right| {
-        graph[*left]
-            .unique_id
-            .cmp(&graph[*right].unique_id)
-            .then_with(|| left.index().cmp(&right.index()))
-    });
-    matches
+        .collect()
 }
 
-fn lookup_result(graph: &LineageGraph, matches: Vec<NodeIndex>) -> NodeLookupResult {
-    match matches.len() {
-        0 => NodeLookupResult::NotFound,
-        1 => NodeLookupResult::Found(matches[0]),
+fn lookup_result(
+    graph: &LineageGraph,
+    name: &str,
+    mut matches: Vec<NodeIndex>,
+    prefer_model: bool,
+) -> Result<Option<NodeIndex>> {
+    if prefer_model
+        && matches
+            .iter()
+            .any(|&idx| graph[idx].node_type == NodeType::Model)
+    {
+        matches.retain(|&idx| graph[idx].node_type == NodeType::Model);
+    }
+
+    match matches.as_slice() {
+        [] => Ok(None),
+        [idx] => Ok(Some(*idx)),
         _ => {
-            let ids = matches
+            let mut candidates: Vec<_> = matches
                 .iter()
                 .map(|&idx| graph[idx].unique_id.clone())
                 .collect();
-            NodeLookupResult::Ambiguous(matches[0], ids)
+            candidates.sort_unstable();
+            Err(DbtLineageError::AmbiguousNodeName {
+                name: name.to_string(),
+                candidates,
+            }
+            .into())
         }
     }
 }
 
-/// Resolve a node by name, returning the node index or an error.
-/// Warns to stderr when the highest-priority lookup stage matches multiple nodes.
+/// Resolve a required node name, returning an error for a missing or ambiguous name.
 pub fn resolve_node_by_name(graph: &LineageGraph, name: &str) -> Result<NodeIndex> {
-    match find_node_by_name(graph, name) {
-        NodeLookupResult::Found(idx) => Ok(idx),
-        NodeLookupResult::Ambiguous(idx, ids) => {
+    find_node_by_name(graph, name)?
+        .ok_or_else(|| DbtLineageError::ModelNotFound(name.to_string()).into())
+}
+
+/// Resolve a batch of focus names. Warn for missing names and reject any ambiguity.
+pub fn resolve_focus_nodes(graph: &LineageGraph, names: &[String]) -> Result<Vec<NodeIndex>> {
+    let mut indices = Vec::new();
+    for name in names {
+        if let Some(idx) = find_node_by_name(graph, name)? {
+            indices.push(idx);
+        } else {
             crate::warn!(
-                "'{}' matched multiple nodes: {}. Using the first match.",
-                name,
-                ids.join(", ")
+                "{}, skipping.",
+                DbtLineageError::ModelNotFound(name.clone())
             );
-            Ok(idx)
-        }
-        NodeLookupResult::NotFound => Err(DbtLineageError::ModelNotFound(name.to_string()).into()),
-    }
-}
-
-/// Silently resolve a node by name, returning `Some(index)` or `None`.
-///
-/// Unlike [`try_resolve_node`], this does not emit any warnings, making it
-/// suitable for best-effort lookups where warnings have already been issued.
-pub fn try_resolve_node_quiet(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
-    match find_node_by_name(graph, name) {
-        NodeLookupResult::Found(idx) | NodeLookupResult::Ambiguous(idx, _) => Some(idx),
-        NodeLookupResult::NotFound => None,
-    }
-}
-
-/// Resolve a node by name, returning `Some(index)` or `None` with a warning.
-/// Unlike [`resolve_node_by_name`], this does not return an error for missing
-/// nodes, making it suitable for batch lookups where skipping is preferred.
-pub fn try_resolve_node(graph: &LineageGraph, name: &str) -> Option<NodeIndex> {
-    match resolve_node_by_name(graph, name) {
-        Ok(idx) => Some(idx),
-        Err(e) => {
-            crate::warn!("{}, skipping.", e);
-            None
         }
     }
+    if indices.is_empty() && !names.is_empty() {
+        return Err(DbtLineageError::ModelNotFound(names.join(", ")).into());
+    }
+    Ok(indices)
 }
 
 /// A compiled pattern matcher: either a pre-compiled glob or a plain string.
@@ -273,6 +256,29 @@ pub fn filter_graph(
     selectors: &[Selector],
     transitive: bool,
 ) -> Result<LineageGraph> {
+    let focus_nodes = resolve_focus_nodes(graph, focus_models)?;
+    filter_graph_by_indices(
+        graph,
+        &[],
+        &focus_nodes,
+        upstream,
+        downstream,
+        selectors,
+        transitive,
+    )
+    .map(|(graph, _)| graph)
+}
+
+/// Filter a graph using focus indices already resolved in that graph.
+pub fn filter_graph_by_indices(
+    graph: &LineageGraph,
+    project_gaps: &[ProjectGap],
+    focus_nodes: &[NodeIndex],
+    upstream: Option<usize>,
+    downstream: Option<usize>,
+    selectors: &[Selector],
+    transitive: bool,
+) -> Result<(LineageGraph, Option<Exploration>)> {
     // Check for cycles
     if petgraph::algo::is_cyclic_directed(graph) {
         let cycle = find_directed_cycle(graph)
@@ -285,53 +291,45 @@ pub fn filter_graph(
         );
     }
 
-    let mut keep_nodes: HashSet<NodeIndex> = HashSet::new();
+    let mut keep_nodes = HashSet::new();
+    let mut gaps = Vec::new();
 
-    if !focus_models.is_empty() {
-        for model_name in focus_models {
-            let Some(focus_idx) = try_resolve_node(graph, model_name) else {
-                continue;
-            };
-
-            keep_nodes.insert(focus_idx);
-
-            // BFS upstream (predecessors)
-            bfs_collect(
-                graph,
-                focus_idx,
-                Direction::Incoming,
-                upstream,
-                &mut keep_nodes,
-            );
-
-            // BFS downstream (successors)
-            bfs_collect(
-                graph,
-                focus_idx,
-                Direction::Outgoing,
-                downstream,
-                &mut keep_nodes,
-            );
-        }
-
-        // All specified models were not found
-        if keep_nodes.is_empty() {
-            let names = focus_models
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(DbtLineageError::ModelNotFound(names).into());
-        }
-    } else {
-        // No focus models -- keep all nodes
+    if focus_nodes.is_empty() {
         keep_nodes.extend(graph.node_indices());
+    } else {
+        bfs_collect(
+            graph,
+            focus_nodes,
+            Direction::Incoming,
+            upstream,
+            |idx, depth| {
+                keep_nodes.insert(idx);
+                if upstream != Some(depth) {
+                    gaps.extend(upstream_gap(&graph[idx], depth));
+                }
+            },
+        );
+        bfs_collect(
+            graph,
+            focus_nodes,
+            Direction::Outgoing,
+            downstream,
+            |idx, _| {
+                keep_nodes.insert(idx);
+            },
+        );
+    }
+
+    if !focus_nodes.is_empty() && upstream != Some(0) {
+        gaps.extend(project_exploration_gaps(project_gaps, |scope| {
+            scope != ProjectScope::ManifestDependencies
+        }));
     }
 
     // Apply selector filter: intersect with BFS results (or use as base set)
     if !selectors.is_empty() {
         let selector_matches = apply_selectors(graph, selectors);
-        if !focus_models.is_empty() {
+        if !focus_nodes.is_empty() {
             // Intersect: keep only nodes that match both BFS and selectors
             keep_nodes = keep_nodes
                 .intersection(&selector_matches)
@@ -343,11 +341,39 @@ pub fn filter_graph(
         }
     }
 
-    if transitive {
-        Ok(build_subgraph_with_transitive(graph, &keep_nodes))
+    let filtered = if transitive {
+        build_subgraph_with_transitive(graph, &keep_nodes)
     } else {
-        Ok(build_subgraph(graph, &keep_nodes))
-    }
+        build_subgraph(graph, &keep_nodes)
+    };
+    Ok((filtered, upstream_exploration(gaps)))
+}
+
+fn upstream_gap(node: &NodeData, depth: usize) -> Option<ExplorationGap> {
+    let reasons: Vec<_> = node
+        .dependency_analysis
+        .unresolved()
+        .iter()
+        .filter(|reason| {
+            !matches!(
+                reason,
+                DependencyReason::NotAssessed {
+                    scope: NotAssessedScope::ManifestDependencies
+                        | NotAssessedScope::PhantomDependencies,
+                }
+            )
+        })
+        .cloned()
+        .collect();
+    (!reasons.is_empty()).then(|| ExplorationGap::UnresolvedDependencies {
+        unique_id: node.unique_id.clone(),
+        depth: Some(depth),
+        reasons,
+    })
+}
+
+fn upstream_exploration(gaps: Vec<ExplorationGap>) -> Option<Exploration> {
+    (!gaps.is_empty()).then(|| Exploration::new(ExplorationKind::UpstreamModelDependency, gaps))
 }
 
 /// Find one real directed cycle, with its first node repeated at the end.
@@ -687,29 +713,30 @@ pub fn filter_by_search(graph: &LineageGraph, patterns: &[regex::Regex]) -> Line
 /// BFS traversal collecting nodes up to max_depth levels away
 fn bfs_collect(
     graph: &LineageGraph,
-    start: NodeIndex,
+    starts: &[NodeIndex],
     direction: Direction,
     max_depth: Option<usize>,
-    collected: &mut HashSet<NodeIndex>,
+    mut visit: impl FnMut(NodeIndex, usize),
 ) {
-    let mut queue: VecDeque<(NodeIndex, usize)> = VecDeque::new();
-    queue.push_back((start, 0));
-    let mut visited: HashSet<NodeIndex> = HashSet::new();
-    visited.insert(start);
+    let mut visited = HashSet::new();
+    let mut queue: VecDeque<_> = starts
+        .iter()
+        .copied()
+        .filter(|&idx| visited.insert(idx))
+        .map(|idx| (idx, 0))
+        .collect();
 
     while let Some((node, depth)) = queue.pop_front() {
-        // Skip expansion if at max depth
-        if max_depth.is_some_and(|max| depth >= max) {
+        visit(node, depth);
+        if max_depth == Some(depth) {
             continue;
         }
-
         for e in graph.edges_directed(node, direction) {
             let neighbor = match direction {
                 Direction::Incoming => e.source(),
                 Direction::Outgoing => e.target(),
             };
             if visited.insert(neighbor) {
-                collected.insert(neighbor);
                 queue.push_back((neighbor, depth + 1));
             }
         }

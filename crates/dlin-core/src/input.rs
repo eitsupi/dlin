@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use path_slash::PathExt as _;
 
+use crate::error::DbtLineageError;
 use crate::graph::types::LineageGraph;
 use crate::parser::project::{ResolvedPaths, is_sql_file};
 use crate::parser::yaml_schema;
@@ -242,32 +243,40 @@ fn is_under_dbt_paths(abs_path: &Path, resolved_paths: &ResolvedPaths) -> bool {
     all_paths.into_iter().any(|dir| abs_path.starts_with(dir))
 }
 
-/// Find a graph node whose `file_path` matches the given absolute path and return its label.
-fn resolve_sql_to_label(
+/// Find the canonical ID of the node identified by an SQL file path.
+fn resolve_sql_to_unique_id(
     abs_path: &Path,
     graph: &LineageGraph,
     project_dir: &Path,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     let abs_path = normalize_path(abs_path);
     let project_dir = normalize_path(project_dir);
-    let relative = abs_path.strip_prefix(&project_dir).ok()?;
-    // Normalize to forward slashes once (loop-invariant) for Windows compatibility
-    let rel_str = relative.to_slash_lossy();
-
-    graph.node_indices().find_map(|idx| {
-        let node = &graph[idx];
-        match &node.file_path {
-            Some(node_path) => {
-                let node_str = node_path.to_slash_lossy();
-                if node_str == rel_str {
-                    Some(node.label.clone())
-                } else {
-                    None
-                }
-            }
-            None => None,
-        }
-    })
+    let Ok(relative) = abs_path.strip_prefix(&project_dir) else {
+        return Ok(None);
+    };
+    let relative = relative.to_slash_lossy();
+    let mut matches = graph.node_weights().filter(|node| {
+        node.file_path
+            .as_ref()
+            .is_some_and(|path| path.to_slash_lossy() == relative)
+    });
+    let Some(first) = matches.next() else {
+        return Ok(None);
+    };
+    let Some(second) = matches.next() else {
+        return Ok(Some(first.unique_id.clone()));
+    };
+    let mut candidates: Vec<_> = [first, second]
+        .into_iter()
+        .chain(matches)
+        .map(|node| node.unique_id.clone())
+        .collect();
+    candidates.sort_unstable();
+    Err(DbtLineageError::AmbiguousNodePath {
+        path: relative.into_owned(),
+        candidates,
+    }
+    .into())
 }
 
 /// Parse a YAML schema file and return source and model names defined in it.
@@ -309,8 +318,8 @@ fn expand_yaml_names(abs_path: &Path) -> Vec<String> {
     names
 }
 
-/// Process input lines and resolve them to model/source names suitable for
-/// use as focus models in `filter_graph`.
+/// Expand SQL paths to unique IDs and YAML paths to resource names for focus
+/// lookup. Return an error when an SQL path matches multiple nodes.
 ///
 /// `cwd` is the working directory used to resolve relative file paths (e.g.
 /// paths from `git diff --name-only`).  This may differ from `project_dir`
@@ -321,16 +330,16 @@ pub fn resolve_stdin_inputs(
     resolved_paths: &ResolvedPaths,
     project_dir: &Path,
     cwd: &Path,
-) -> Vec<String> {
+) -> anyhow::Result<Vec<String>> {
     let mut seen = std::collections::HashSet::new();
     let mut names = Vec::new();
 
     for line in lines {
         match classify_line(line, resolved_paths, cwd) {
             InputLine::SqlFile(abs_path) => {
-                if let Some(label) = resolve_sql_to_label(&abs_path, graph, project_dir) {
-                    if seen.insert(label.clone()) {
-                        names.push(label);
+                if let Some(id) = resolve_sql_to_unique_id(&abs_path, graph, project_dir)? {
+                    if seen.insert(id.clone()) {
+                        names.push(id);
                     }
                 } else {
                     crate::warn!("no node found for file {}, skipping.", abs_path.display());
@@ -352,7 +361,7 @@ pub fn resolve_stdin_inputs(
         }
     }
 
-    names
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -564,10 +573,10 @@ mod tests {
         assert!(!is_under_dbt_paths(&abs, &paths));
     }
 
-    // --- resolve_sql_to_label tests ---
+    // --- resolve_sql_to_unique_id tests ---
 
     #[test]
-    fn test_resolve_sql_to_label_found() {
+    fn test_resolve_sql_to_unique_id_found() {
         let project_dir = Path::new("/project");
         let mut graph = LineageGraph::new();
         let mut node = make_node("model.stg_orders", "stg_orders", NodeType::Model);
@@ -575,17 +584,17 @@ mod tests {
         graph.add_node(node);
 
         let abs = Path::new("/project/models/staging/stg_orders.sql");
-        let result = resolve_sql_to_label(abs, &graph, project_dir);
-        assert_eq!(result, Some("stg_orders".to_string()));
+        let result = resolve_sql_to_unique_id(abs, &graph, project_dir).unwrap();
+        assert_eq!(result, Some("model.stg_orders".to_string()));
     }
 
     #[test]
-    fn test_resolve_sql_to_label_not_found() {
+    fn test_resolve_sql_to_unique_id_not_found() {
         let project_dir = Path::new("/project");
         let graph = LineageGraph::new();
 
         let abs = Path::new("/project/models/nonexistent.sql");
-        let result = resolve_sql_to_label(abs, &graph, project_dir);
+        let result = resolve_sql_to_unique_id(abs, &graph, project_dir).unwrap();
         assert_eq!(result, None);
     }
 
@@ -736,7 +745,7 @@ saved_queries:
         let graph = LineageGraph::new();
 
         let lines = vec!["stg_orders".to_string()];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path()).unwrap();
         assert_eq!(result, vec!["stg_orders"]);
     }
 
@@ -748,12 +757,12 @@ saved_queries:
 
         // Files with path separators and non-dbt extensions are ignored
         let lines = vec!["docs/README.md".to_string(), "seeds/data.csv".to_string()];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path()).unwrap();
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_resolve_stdin_deduplicates() {
+    fn test_resolve_stdin_deduplicates_paths_and_retains_explicit_names() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = make_resolved_paths(tmp.path());
         let mut graph = LineageGraph::new();
@@ -761,15 +770,16 @@ saved_queries:
         node.file_path = Some(PathBuf::from("models/stg_orders.sql"));
         graph.add_node(node);
 
-        // Same model referenced both as file path and model name
+        // An explicit name still needs name resolution even when a path matched.
         let models_dir = tmp.path().join("models");
         fs::create_dir_all(&models_dir).unwrap();
         let lines = vec![
             "models/stg_orders.sql".to_string(),
             "stg_orders".to_string(),
+            "models/stg_orders.sql".to_string(),
         ];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
-        assert_eq!(result, vec!["stg_orders"]);
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path()).unwrap();
+        assert_eq!(result, vec!["model.stg_orders", "stg_orders"]);
     }
 
     #[test]
@@ -784,7 +794,7 @@ saved_queries:
             "Cargo.toml".to_string(),
             "stg_orders".to_string(),
         ];
-        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path());
+        let result = resolve_stdin_inputs(&lines, &graph, &paths, tmp.path(), tmp.path()).unwrap();
         assert_eq!(result, vec!["stg_orders"]);
     }
 
@@ -803,8 +813,8 @@ saved_queries:
         let line = "models/staging/stg_orders.sql";
         match classify_line(line, &paths, tmp.path()) {
             InputLine::SqlFile(abs_path) => {
-                let label = resolve_sql_to_label(&abs_path, &graph, tmp.path());
-                assert_eq!(label, Some("stg_orders".to_string()));
+                let label = resolve_sql_to_unique_id(&abs_path, &graph, tmp.path()).unwrap();
+                assert_eq!(label, Some("model.stg_orders".to_string()));
             }
             other => panic!("Expected SqlFile, got {:?}", std::mem::discriminant(&other)),
         }
@@ -826,8 +836,9 @@ saved_queries:
             &paths,
             tmp.path(),
             tmp.path(),
-        );
-        assert_eq!(result, vec!["orders"]);
+        )
+        .unwrap();
+        assert_eq!(result, vec!["model.orders"]);
     }
 
     #[test]
@@ -885,7 +896,8 @@ saved_queries:
         for line in inputs {
             match classify_line(line, &paths, tmp.path()) {
                 InputLine::SqlFile(abs) => {
-                    if let Some(label) = resolve_sql_to_label(&abs, &graph, tmp.path()) {
+                    if let Some(label) = resolve_sql_to_unique_id(&abs, &graph, tmp.path()).unwrap()
+                    {
                         result.push(label);
                     }
                 }
@@ -896,7 +908,10 @@ saved_queries:
                 InputLine::Ignore => {}
             }
         }
-        assert_eq!(result, vec!["stg_orders", "raw.orders", "raw.customers"]);
+        assert_eq!(
+            result,
+            vec!["model.stg_orders", "raw.orders", "raw.customers"]
+        );
     }
 
     #[test]
@@ -923,8 +938,8 @@ saved_queries:
             InputLine::SqlFile(abs_path) => {
                 // abs_path should be tmp/dbt/models/stg_orders.sql
                 // project_dir = dbt_dir = tmp/dbt
-                let label = resolve_sql_to_label(&abs_path, &graph, &dbt_dir);
-                assert_eq!(label, Some("stg_orders".to_string()));
+                let label = resolve_sql_to_unique_id(&abs_path, &graph, &dbt_dir).unwrap();
+                assert_eq!(label, Some("model.stg_orders".to_string()));
             }
             other => panic!("Expected SqlFile, got {:?}", std::mem::discriminant(&other)),
         }

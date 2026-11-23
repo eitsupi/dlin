@@ -346,9 +346,8 @@ mod exploration {
         InputLocation, InputStage, NodeCallSite, NodeDependencyReason, NotAssessedScope,
         ProjectGap, ProjectScope, RuntimeValueSource,
     };
-    use crate::graph::impact::{
-        DependencyPolicy, ExplorationGap, ExplorationStatus, NamespaceMatch,
-    };
+    use crate::graph::exploration::{ExplorationGap, ExplorationStatus};
+    use crate::graph::impact::{DependencyPolicy, NamespaceMatch};
     use serde_json::json;
 
     fn at(unique_id: &str) -> NodeCallSite {
@@ -487,6 +486,7 @@ mod exploration {
             gaps(&report),
             [ExplorationGap::UnresolvedDependencies {
                 unique_id: "model.b".to_string(),
+                depth: None,
                 reasons: vec![namespaced("model.b", "dbt_utils")],
             }]
         );
@@ -543,6 +543,7 @@ mod exploration {
             gaps(&from_b),
             [ExplorationGap::UnresolvedDependencies {
                 unique_id: "model.a".to_string(),
+                depth: None,
                 reasons: vec![namespaced("model.a", "dbt")],
             }]
         );
@@ -730,6 +731,7 @@ mod exploration {
     fn project_gaps_need_their_own_permission() {
         let empty_reasons = ExplorationGap::UnresolvedDependencies {
             unique_id: "model.x".to_string(),
+            depth: None,
             reasons: vec![],
         };
         let permissive = DependencyPolicy::deny_all().allow_reason(
@@ -766,7 +768,7 @@ mod exploration {
 mod projects {
     use super::*;
     use crate::graph::builder::build_graph_report;
-    use crate::graph::impact::ExplorationGap;
+    use crate::graph::exploration::{ExplorationGap, ExplorationStatus};
     use crate::parser::discovery::discover_files;
     use crate::parser::project::DbtProject;
     use serde_json::json;
@@ -793,7 +795,7 @@ mod projects {
         let discovered = discover_files(&project.resolve_paths(&project_dir)).unwrap();
         let build =
             build_graph_report(&project_dir, &project.name, &discovered, &project.vars).unwrap();
-        let idx = crate::graph::filter::try_resolve_node_quiet(build.graph(), input).unwrap();
+        let idx = crate::graph::filter::resolve_node_by_name(build.graph(), input).unwrap();
         compute_impact(&build, idx, scope).unwrap()
     }
 
@@ -950,7 +952,7 @@ models:
         assert!(!from_base.proves_no_impact());
         assert_eq!(
             from_base.exploration[0].status(),
-            crate::graph::impact::ExplorationStatus::Complete
+            crate::graph::exploration::ExplorationStatus::Complete
         );
     }
 }

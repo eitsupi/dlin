@@ -1108,6 +1108,51 @@ fn pages_preserve_edges_and_endpoints_and_reject_mismatched_cursors() {
 }
 
 #[test]
+fn node_lookup_tools_report_ambiguity_with_candidate_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{
+            "metadata": {},
+            "nodes": {
+                "model.a.orders": {"unique_id":"model.a.orders","name":"orders","resource_type":"model"},
+                "model.b.orders": {"unique_id":"model.b.orders","name":"orders","resource_type":"model"}
+            }
+        }"#,
+    )
+    .unwrap();
+    let state = McpState::load(McpArgs {
+        project_dir: tmp.path().to_path_buf(),
+        manifest_path: Some(manifest_path),
+        dialect: Some(generic_dialect()),
+    })
+    .unwrap();
+
+    for (tool, args) in [
+        ("find_nodes", json!({"names":["model.a.orders","orders"]})),
+        ("get_lineage", json!({"models":["model.a.orders","orders"]})),
+        ("get_impact", json!({"model":"orders"})),
+    ] {
+        let result = call_tool(&json!({"name":tool,"arguments":args}), &state).unwrap();
+        assert_eq!(result["isError"], true, "{tool}");
+        let error = body(&result);
+        assert_eq!(error["kind"], "ambiguous_node_name");
+        assert_eq!(error["name"], "orders");
+        assert_eq!(
+            error["candidates"],
+            json!(["model.a.orders", "model.b.orders"])
+        );
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("Specify a unique_id.")
+        );
+    }
+}
+
+#[test]
 fn invalid_tool_arguments_use_one_compact_text_item() {
     let result = call_tool(
         &json!({"name":"find_nodes","arguments":{"names":vec!["orders";21]}}),
@@ -1169,4 +1214,102 @@ fn column_pages_preserve_each_impact_and_gap_at_both_detail_levels() {
             .collect();
         assert_eq!(gaps, all_gaps);
     }
+}
+
+#[test]
+fn lineage_exploration_is_depth_bounded_and_independent_of_page() {
+    use dlin_core::graph::builder::build_graph_report;
+    use dlin_core::parser::discovery::DiscoveredFiles;
+
+    let mut state = state();
+    let manifest_lineage =
+        get_lineage(&json!({"models":["orders"],"upstream_depth":10}), &state).unwrap();
+    assert!(manifest_lineage.get("exploration").is_none());
+
+    // MCP normally loads a manifest. Inject a real SQL build to exercise the
+    // same response path with unresolved dependency evidence.
+    let tmp = tempfile::tempdir().unwrap();
+    let files = [
+        ("base.sql", "select 1 as id"),
+        (
+            "middle.sql",
+            r#"select {{ external_pkg.opaque() }} from {{ ref('base') }}"#,
+        ),
+        (
+            "root.sql",
+            r#"select * from {{ ref('base') }} union all select * from {{ ref('middle') }}"#,
+        ),
+    ];
+    let mut discovered = DiscoveredFiles::default();
+    for (name, sql) in files {
+        let path = tmp.path().join(name);
+        std::fs::write(&path, sql).unwrap();
+        discovered.model_sql_files.push(path);
+    }
+    state.build =
+        build_graph_report(tmp.path(), "project", &discovered, &Default::default()).unwrap();
+
+    for depth in [0, 1] {
+        let response = get_lineage(
+            &json!({"models":["root"],"upstream_depth":depth,"downstream_depth":0}),
+            &state,
+        )
+        .unwrap();
+        assert!(response.get("exploration").is_none());
+    }
+
+    let request = json!({"name":"get_lineage","arguments":{"models":["root"],"upstream_depth":10,"downstream_depth":0,"limit":1}});
+    let first = body(&call_tool(&request, &state).unwrap());
+    assert_eq!(first["exploration"]["status"], "incomplete");
+    let gap = &first["exploration"]["gaps"][0];
+    assert_eq!(gap["unique_id"], "model.middle");
+    assert_eq!(gap["depth"], 1);
+    assert_eq!(gap["reasons"][0]["type"], "unsupported_macro_namespace");
+    let mut next = request;
+    next["arguments"]["cursor"] = first["page"]["next_cursor"].clone();
+    let second = body(&call_tool(&next, &state).unwrap());
+    assert!(
+        second["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["unique_id"] != "model.middle")
+    );
+    assert_eq!(first["exploration"], second["exploration"]);
+}
+
+#[test]
+fn lineage_reports_skipped_sql_project_inputs_when_upstream_can_expand() {
+    use dlin_core::graph::builder::build_graph_report;
+    use dlin_core::parser::discovery::DiscoveredFiles;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Discovery yields canonical paths, which the reported path is relative to.
+    let project_dir = tmp.path().canonicalize().unwrap();
+    let model = project_dir.join("root.sql");
+    let yaml = project_dir.join("broken.yml");
+    std::fs::write(&model, "select 1 as id").unwrap();
+    std::fs::write(&yaml, "sources: [").unwrap();
+    let mut state = state();
+    state.build = build_graph_report(
+        &project_dir,
+        "project",
+        &DiscoveredFiles {
+            model_sql_files: vec![model],
+            yaml_files: vec![yaml],
+            ..Default::default()
+        },
+        &Default::default(),
+    )
+    .unwrap();
+
+    let result = get_lineage(&json!({"models":["root"],"upstream_depth":1}), &state).unwrap();
+    assert_eq!(result["exploration"]["status"], "incomplete");
+    assert_eq!(result["exploration"]["gaps"][0]["type"], "input_skipped");
+    assert_eq!(
+        result["exploration"]["gaps"][0]["location"]["path"],
+        "broken.yml"
+    );
+    let result = get_lineage(&json!({"models":["root"],"upstream_depth":0}), &state).unwrap();
+    assert!(result.get("exploration").is_none());
 }

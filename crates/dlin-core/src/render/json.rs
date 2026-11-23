@@ -6,6 +6,7 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::graph::exploration::Exploration;
 use crate::graph::types::*;
 
 /// All available node fields for graph JSON output.
@@ -61,9 +62,11 @@ pub fn resolve_graph_fields(
 }
 
 #[derive(Serialize)]
-struct JsonGraph {
+struct JsonGraph<'a> {
     nodes: Vec<Value>,
     edges: Vec<JsonEdge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exploration: Option<&'a Exploration>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +197,7 @@ pub fn render_json(
     graph: &LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
     fields: &HashSet<String>,
+    exploration: Option<&Exploration>,
 ) {
     let mut stdout = std::io::stdout().lock();
     let pretty = stdout.is_terminal();
@@ -201,6 +205,7 @@ pub fn render_json(
         graph,
         sql_contents,
         fields,
+        exploration,
         &mut stdout,
         pretty,
     ));
@@ -211,6 +216,7 @@ pub fn render_json_to_writer<W: Write>(
     graph: &LineageGraph,
     sql_contents: Option<&HashMap<String, String>>,
     fields: &HashSet<String>,
+    exploration: Option<&Exploration>,
     w: &mut W,
     pretty: bool,
 ) -> std::io::Result<()> {
@@ -246,7 +252,11 @@ pub fn render_json_to_writer<W: Write>(
             .then(a.edge_type.cmp(&b.edge_type))
     });
 
-    let json_graph = JsonGraph { nodes, edges };
+    let json_graph = JsonGraph {
+        nodes,
+        edges,
+        exploration,
+    };
     if pretty {
         serde_json::to_writer_pretty(&mut *w, &json_graph).map_err(super::serde_io_error)?;
     } else {
@@ -269,7 +279,7 @@ mod tests {
 
     fn render_to_string(graph: &LineageGraph) -> String {
         let mut buf = Vec::new();
-        render_json_to_writer(graph, None, &all_fields(), &mut buf, true).unwrap();
+        render_json_to_writer(graph, None, &all_fields(), None, &mut buf, true).unwrap();
         String::from_utf8(buf).unwrap()
     }
 
@@ -483,7 +493,15 @@ mod tests {
             "SELECT * FROM {{ ref('stg_orders') }}".to_string(),
         )]);
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, Some(&sql_contents), &all_fields(), &mut buf, true).unwrap();
+        render_json_to_writer(
+            &graph,
+            Some(&sql_contents),
+            &all_fields(),
+            None,
+            &mut buf,
+            true,
+        )
+        .unwrap();
         let output = String::from_utf8(buf).unwrap();
         insta::assert_snapshot!(output);
     }
@@ -495,7 +513,7 @@ mod tests {
         let b = graph.add_node(make_node("model.b", "b", NodeType::Model));
         graph.add_edge(a, b, EdgeData::direct(EdgeType::Ref));
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &all_fields(), &mut buf, false).unwrap();
+        render_json_to_writer(&graph, None, &all_fields(), None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let lines: Vec<&str> = output.trim_end().split('\n').collect();
         assert_eq!(lines.len(), 1, "compact JSON should be a single line");
@@ -576,7 +594,7 @@ mod tests {
         });
         let fields = resolve_graph_fields(None, false).unwrap();
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &fields, &mut buf, false).unwrap();
+        render_json_to_writer(&graph, None, &fields, None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let node = &parsed["nodes"][0];
@@ -612,7 +630,7 @@ mod tests {
         let fields =
             resolve_graph_fields(Some(&["unique_id".into(), "description".into()]), false).unwrap();
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &fields, &mut buf, false).unwrap();
+        render_json_to_writer(&graph, None, &fields, None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let node = &parsed["nodes"][0];
@@ -642,7 +660,7 @@ mod tests {
         });
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &fields, &mut buf, false).unwrap();
+        render_json_to_writer(&graph, None, &fields, None, &mut buf, false).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let node = &parsed["nodes"][0];
@@ -689,7 +707,7 @@ mod tests {
 
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &fields, &mut buf, true).unwrap();
+        render_json_to_writer(&graph, None, &fields, None, &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let node = &parsed["nodes"][0];
@@ -710,7 +728,7 @@ mod tests {
 
         let fields = resolve_graph_fields(None, true).unwrap();
         let mut buf = Vec::new();
-        render_json_to_writer(&graph, None, &fields, &mut buf, true).unwrap();
+        render_json_to_writer(&graph, None, &fields, None, &mut buf, true).unwrap();
         let output = String::from_utf8(buf).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let node = &parsed["nodes"][0];

@@ -35,7 +35,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
     )?;
     let dag = build.graph();
 
-    // Merge CLI positional args and stdin, then resolve file paths to node names
+    // Merge CLI positional args and stdin, then expand file paths to focus inputs
     let stdin_lines = input::read_stdin_lines();
     let mut raw_inputs = args.model;
     raw_inputs.extend(stdin_lines);
@@ -44,7 +44,7 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
@@ -58,9 +58,11 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Filter graph
     let transitive = !args.no_transitive;
-    let filtered = graph::filter::filter_graph(
+    let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
+    let (filtered, exploration) = graph::filter::filter_graph_by_indices(
         dag,
-        &models,
+        build.project_gaps(),
+        &focus_nodes,
         args.upstream,
         args.downstream,
         &selectors,
@@ -93,17 +95,9 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             );
             filtered
         } else {
-            // Resolve focus models deterministically: look up unique_ids in the
-            // original DAG first, then find those exact ids in the filtered graph.
-            // This avoids re-resolving suffix-ambiguous names nondeterministically.
-            let focus_unique_ids: std::collections::HashSet<String> = models
-                .iter()
-                .filter_map(|name| {
-                    graph::filter::try_resolve_node_quiet(dag, name)
-                        .map(|idx| dag[idx].unique_id.clone())
-                })
-                .collect();
-            let preserve: std::collections::HashSet<_> = filtered
+            let focus_unique_ids: HashSet<_> =
+                focus_nodes.iter().map(|&idx| &dag[idx].unique_id).collect();
+            let preserve = filtered
                 .node_indices()
                 .filter(|&idx| focus_unique_ids.contains(&filtered[idx].unique_id))
                 .collect();
@@ -180,15 +174,23 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
         );
     }
 
-    render_output(
-        &args.output,
-        &filtered,
-        sql_contents.as_ref(),
-        &json_fields,
-        args.group_by,
-        args.direction,
-        args.show_columns,
-    );
+    if matches!(args.output, cli::OutputFormat::Json) {
+        render::json::render_json(
+            &filtered,
+            sql_contents.as_ref(),
+            &json_fields,
+            exploration.as_ref(),
+        );
+    } else {
+        warn_upstream_exploration(exploration.as_ref());
+        render_output(
+            &args.output,
+            &filtered,
+            args.group_by,
+            args.direction,
+            args.show_columns,
+        );
+    }
 
     Ok(())
 }
@@ -218,7 +220,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
     )?;
     let dag = build.graph();
 
-    // Merge CLI positional args and stdin, then resolve file paths to node names
+    // Merge CLI positional args and stdin, then expand file paths to focus inputs
     let stdin_lines = input::read_stdin_lines();
     let mut raw_inputs = args.model;
     raw_inputs.extend(stdin_lines);
@@ -227,7 +229,7 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(args.source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
@@ -317,8 +319,6 @@ pub(crate) fn run_list_command(args: ListArgs) -> Result<()> {
 fn render_output(
     format: &cli::OutputFormat,
     graph: &graph::types::LineageGraph,
-    sql_contents: Option<&HashMap<String, String>>,
-    json_fields: &std::collections::HashSet<String>,
     group_by: Option<GroupBy>,
     direction: Direction,
     show_columns: bool,
@@ -326,7 +326,7 @@ fn render_output(
     match format {
         cli::OutputFormat::Ascii => render::ascii::render_ascii(graph),
         cli::OutputFormat::Dot => render::dot::render_dot(graph, group_by, direction),
-        cli::OutputFormat::Json => render::json::render_json(graph, sql_contents, json_fields),
+        cli::OutputFormat::Json => unreachable!("JSON output is handled separately"),
         cli::OutputFormat::Mermaid => {
             render::mermaid::render_mermaid(graph, group_by, direction, show_columns)
         }
@@ -450,30 +450,23 @@ pub(crate) fn run_impact_command(
     )?;
     let dag = build.graph();
 
-    // Resolve file paths to model names (same as graph/list commands)
+    // Expand file paths to focus inputs (same as graph/list commands)
     let models = if input::has_path_like_input(&raw_inputs) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("failed to determine current working directory: {}", e))?;
         let resolved_paths =
             resolve_paths_for_path_input(*source, &project_dir, project_opt.as_ref())?;
-        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)
+        input::resolve_stdin_inputs(&raw_inputs, dag, &resolved_paths, &project_dir, &cwd)?
     } else {
         raw_inputs
     };
 
-    // Deduplicate while preserving order
+    let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
     let mut seen = HashSet::new();
-    let models: Vec<String> = models
+    let reports: Vec<_> = focus_nodes
         .into_iter()
-        .filter(|m| seen.insert(m.clone()))
-        .collect();
-
-    let reports: Vec<_> = models
-        .iter()
-        .filter_map(|model| {
-            let source_idx = graph::filter::try_resolve_node(dag, model)?;
-            graph::impact::compute_impact(&build, source_idx, &scope)
-        })
+        .filter(|&idx| seen.insert(idx))
+        .filter_map(|source_idx| graph::impact::compute_impact(&build, source_idx, &scope))
         .collect();
 
     if reports.is_empty() {

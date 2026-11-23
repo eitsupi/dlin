@@ -23,6 +23,7 @@ pub enum Command {
     #[command(
         long_about = "\
 Compute downstream impact analysis for one or more models.
+Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
 
 Reports downstream dependents of the selected node types and assigns severity levels:
   Critical  impacts exposures (dashboards, reports)
@@ -54,8 +55,7 @@ Completeness:
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
-  File paths (detected by extension or path separator) are resolved to model names \
-  using the dbt project configuration.
+  SQL paths select a node by unique ID. YAML paths expand to resource names.
 
 Exit codes:
   0   Success (impact computed, even if no downstream dependents)
