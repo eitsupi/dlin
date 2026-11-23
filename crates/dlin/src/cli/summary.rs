@@ -130,6 +130,7 @@ Examples:
 )]
 pub struct ListArgs {
     /// Model names to list (lists all nodes if omitted)
+    /// Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
     pub model: Vec<String>,
 
     /// Path to dbt project directory

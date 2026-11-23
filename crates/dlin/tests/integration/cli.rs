@@ -811,3 +811,46 @@ fn debug_trace_column_shows_ambiguous_candidates_and_reports_dialect_misses() {
         }
     }
 }
+
+#[test]
+fn ambiguous_name_fails_graph_list_and_impact_even_with_an_exact_input() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest = tmp.path().join("manifest.json");
+    std::fs::write(
+        &manifest,
+        r#"{
+            "metadata": {},
+            "nodes": {
+                "model.a.orders": {"unique_id":"model.a.orders","name":"orders","resource_type":"model"},
+                "model.b.orders": {"unique_id":"model.b.orders","name":"orders","resource_type":"model"}
+            }
+        }"#,
+    )
+    .unwrap();
+
+    for command in ["graph", "list", "impact"] {
+        let output = Command::new(binary_path())
+            .args([
+                command,
+                "model.a.orders",
+                "orders",
+                "--source",
+                "manifest",
+                "--no-cache",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{command}");
+        assert!(output.stdout.is_empty(), "{command}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(
+                "ambiguous node name 'orders': model.a.orders, model.b.orders. Specify a unique_id."
+            ),
+            "{command}: {:?}",
+            output.stderr
+        );
+    }
+}

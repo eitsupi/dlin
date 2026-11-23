@@ -8,7 +8,7 @@ Usage: dlin list [OPTIONS] [MODEL]...
 
 Arguments:
   [MODEL]...
-          Model names to list (lists all nodes if omitted)
+          Model names to list (lists all nodes if omitted) Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity
 
 Options:
       --error-format <ERROR_FORMAT>

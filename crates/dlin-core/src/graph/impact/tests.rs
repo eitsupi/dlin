@@ -793,7 +793,7 @@ mod projects {
         let discovered = discover_files(&project.resolve_paths(&project_dir)).unwrap();
         let build =
             build_graph_report(&project_dir, &project.name, &discovered, &project.vars).unwrap();
-        let idx = crate::graph::filter::try_resolve_node_quiet(build.graph(), input).unwrap();
+        let idx = crate::graph::filter::resolve_node_by_name(build.graph(), input).unwrap();
         compute_impact(&build, idx, scope).unwrap()
     }
 

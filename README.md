@@ -390,6 +390,8 @@ These synthetic results use artifacts derived from the real dbt fixture. Each ti
 
 ## Key subcommands
 
+For `graph`, `list`, and `impact`, an exact unique ID takes precedence. A short name prefers models when other node types share the name. If multiple candidates remain, the command reports their IDs and asks you to specify one. `--node-type` filters the output, and `--select` matches a set of nodes.
+
 ### `list`
 
 ```sh
@@ -457,7 +459,7 @@ dlin impact orders -o json -q > impact.json && jq -e --arg id model.orders '
 ' impact.json
 ```
 
-The MCP `proves_no_impact` field uses the same scope and requires a complete exploration. Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds as long as one input is found, and its exit code does not depend on completeness.
+The MCP `proves_no_impact` field uses the same scope and requires a complete exploration. Checking `source_node.unique_id` catches an input that did not resolve to the node you meant; with several inputs, check each report. `impact` succeeds when at least one input is found and no input is ambiguous. Its exit code does not depend on completeness.
 
 You may decide, after checking them, that some reasons do not hide a dependency in your project. To proceed despite them, accept a gap only when every one of its reasons matches a rule you have checked, and reject everything else, including reason and gap types you do not know. For example, to accept calls through the `dbt` namespace:
 

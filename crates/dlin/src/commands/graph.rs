@@ -58,9 +58,10 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
 
     // Filter graph
     let transitive = !args.no_transitive;
-    let filtered = graph::filter::filter_graph(
+    let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
+    let filtered = graph::filter::filter_graph_by_indices(
         dag,
-        &models,
+        &focus_nodes,
         args.upstream,
         args.downstream,
         &selectors,
@@ -93,17 +94,9 @@ pub(crate) fn run_graph_command(args: GraphArgs) -> Result<()> {
             );
             filtered
         } else {
-            // Resolve focus models deterministically: look up unique_ids in the
-            // original DAG first, then find those exact ids in the filtered graph.
-            // This avoids re-resolving suffix-ambiguous names nondeterministically.
-            let focus_unique_ids: std::collections::HashSet<String> = models
-                .iter()
-                .filter_map(|name| {
-                    graph::filter::try_resolve_node_quiet(dag, name)
-                        .map(|idx| dag[idx].unique_id.clone())
-                })
-                .collect();
-            let preserve: std::collections::HashSet<_> = filtered
+            let focus_unique_ids: HashSet<_> =
+                focus_nodes.iter().map(|&idx| &dag[idx].unique_id).collect();
+            let preserve = filtered
                 .node_indices()
                 .filter(|&idx| focus_unique_ids.contains(&filtered[idx].unique_id))
                 .collect();
@@ -468,12 +461,10 @@ pub(crate) fn run_impact_command(
         .filter(|m| seen.insert(m.clone()))
         .collect();
 
-    let reports: Vec<_> = models
-        .iter()
-        .filter_map(|model| {
-            let source_idx = graph::filter::try_resolve_node(dag, model)?;
-            graph::impact::compute_impact(&build, source_idx, &scope)
-        })
+    let focus_nodes = graph::filter::resolve_focus_nodes(dag, &models)?;
+    let reports: Vec<_> = focus_nodes
+        .into_iter()
+        .filter_map(|source_idx| graph::impact::compute_impact(&build, source_idx, &scope))
         .collect();
 
     if reports.is_empty() {

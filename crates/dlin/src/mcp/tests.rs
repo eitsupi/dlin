@@ -1108,6 +1108,51 @@ fn pages_preserve_edges_and_endpoints_and_reject_mismatched_cursors() {
 }
 
 #[test]
+fn node_lookup_tools_report_ambiguity_with_candidate_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest_path = tmp.path().join("manifest.json");
+    std::fs::write(
+        &manifest_path,
+        r#"{
+            "metadata": {},
+            "nodes": {
+                "model.a.orders": {"unique_id":"model.a.orders","name":"orders","resource_type":"model"},
+                "model.b.orders": {"unique_id":"model.b.orders","name":"orders","resource_type":"model"}
+            }
+        }"#,
+    )
+    .unwrap();
+    let state = McpState::load(McpArgs {
+        project_dir: tmp.path().to_path_buf(),
+        manifest_path: Some(manifest_path),
+        dialect: Some(generic_dialect()),
+    })
+    .unwrap();
+
+    for (tool, args) in [
+        ("find_nodes", json!({"names":["model.a.orders","orders"]})),
+        ("get_lineage", json!({"models":["model.a.orders","orders"]})),
+        ("get_impact", json!({"model":"orders"})),
+    ] {
+        let result = call_tool(&json!({"name":tool,"arguments":args}), &state).unwrap();
+        assert_eq!(result["isError"], true, "{tool}");
+        let error = body(&result);
+        assert_eq!(error["kind"], "ambiguous_node_name");
+        assert_eq!(error["name"], "orders");
+        assert_eq!(
+            error["candidates"],
+            json!(["model.a.orders", "model.b.orders"])
+        );
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("Specify a unique_id.")
+        );
+    }
+}
+
+#[test]
 fn invalid_tool_arguments_use_one_compact_text_item() {
     let result = call_tool(
         &json!({"name":"find_nodes","arguments":{"names":vec!["orders";21]}}),

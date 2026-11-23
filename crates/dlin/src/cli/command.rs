@@ -23,6 +23,7 @@ pub enum Command {
     #[command(
         long_about = "\
 Compute downstream impact analysis for one or more models.
+Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
 
 Reports downstream dependents of the selected node types and assigns severity levels:
   Critical  impacts exposures (dashboards, reports)

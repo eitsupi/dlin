@@ -32,6 +32,12 @@ pub enum DbtLineageError {
     #[error("model not found: {0}")]
     ModelNotFound(String),
 
+    #[error("ambiguous node name '{name}': {}. Specify a unique_id.", .candidates.join(", "))]
+    AmbiguousNodeName {
+        name: String,
+        candidates: Vec<String>,
+    },
+
     #[error("cycle detected in lineage graph")]
     CycleDetected,
 

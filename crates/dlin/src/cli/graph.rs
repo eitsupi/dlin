@@ -125,6 +125,7 @@ Examples:
 )]
 pub struct GraphArgs {
     /// Model names to focus on (shows full lineage if omitted)
+    /// Exact unique IDs take precedence. Short names prefer models. Use a unique ID to resolve ambiguity.
     pub model: Vec<String>,
 
     /// Path to dbt project directory

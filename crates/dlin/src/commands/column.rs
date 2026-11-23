@@ -78,14 +78,17 @@ pub(crate) fn run_column_lineage_command(
             .filter(|n| n.resource_type == "model")
             .map(|n| n.name.as_str())
             .collect();
-        all_resolved
-            .into_iter()
-            .filter(|name| {
-                raw_input_set.contains(name.as_str())
-                    || manifest_model_names.contains(name.as_str())
-                    || graph::filter::try_resolve_node_quiet(&dag, name).is_none()
-            })
-            .collect()
+        let mut models = Vec::new();
+        for name in all_resolved {
+            let resolved = graph::filter::find_node_by_name(&dag, &name)?;
+            if raw_input_set.contains(name.as_str())
+                || manifest_model_names.contains(name.as_str())
+                || resolved.is_none()
+            {
+                models.push(name);
+            }
+        }
+        models
     } else {
         raw_inputs
     };

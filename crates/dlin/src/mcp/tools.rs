@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::{column_result, page::Page, protocol::McpState};
 use crate::commands::{check_loaded_manifest_freshness, read_seed_schemas};
+use dlin_core::error::DbtLineageError;
 use dlin_core::graph;
 use dlin_core::graph::filter::KNOWN_NODE_TYPE_LABELS;
 use dlin_core::graph::types::NodeType;
@@ -40,7 +41,7 @@ pub(super) fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up." },
+                    "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Node names (e.g. 'orders') or dbt unique IDs (e.g. 'model.my_project.orders', 'source.my_project.raw.orders') to look up. Exact IDs take precedence. Short names prefer models; remaining ambiguities return candidate IDs." },
                     "node_types": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["model", "source", "seed", "snapshot", "test", "exposure", "semantic_model", "metric", "saved_query"] },
@@ -57,7 +58,7 @@ pub(super) fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "models": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Names or unique IDs of the models to centre the lineage on. At least one is required." },
+                    "models": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Names or unique IDs of the models to centre the lineage on. At least one is required. Exact IDs take precedence. Short names prefer models; remaining ambiguities return candidate IDs." },
                     "upstream_depth": { "type": "integer", "minimum": 0, "default": 1, "description": "Number of hops to traverse toward sources. Default: 1." },
                     "downstream_depth": { "type": "integer", "minimum": 0, "default": 1, "description": "Number of hops to traverse toward exposures and consumers. Default: 1." }
                 },
@@ -71,7 +72,7 @@ pub(super) fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse." },
+                    "model": { "type": "string", "description": "Name or unique ID of the model whose downstream impact to analyse. Exact IDs take precedence. Short names prefer models; remaining ambiguities return candidate IDs." },
                     "node_types": {
                         "type": "array",
                         "minItems": 1,
@@ -147,7 +148,17 @@ pub(super) fn call_tool(
                 .then_some(state.dialect_warning.as_deref())
                 .flatten(),
         ),
-        Err(err) => tool_result(json!({ "error": err.to_string() }), true, None),
+        Err(err) => {
+            let mut payload = json!({ "error": err.to_string() });
+            if let Some(DbtLineageError::AmbiguousNodeName { name, candidates }) =
+                err.downcast_ref()
+            {
+                payload["kind"] = json!("ambiguous_node_name");
+                payload["name"] = json!(name);
+                payload["candidates"] = json!(candidates);
+            }
+            tool_result(payload, true, None)
+        }
     })
 }
 
@@ -285,9 +296,7 @@ pub(super) fn find_nodes(args: &Value, state: &McpState) -> Result<Value> {
     let mut not_found = Vec::new();
 
     for name in names {
-        match resolve_node_unique_id(state, &name)
-            .and_then(|id| graph::filter::try_resolve_node_quiet(state.dag(), &id))
-        {
+        match graph::filter::find_node_by_name(state.dag(), &name)? {
             Some(idx) => {
                 let node = &state.dag()[idx];
                 if type_filter
@@ -392,23 +401,25 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
     let upstream = optional_usize(args, "upstream_depth")?.or(Some(1));
     let downstream = optional_usize(args, "downstream_depth")?.or(Some(1));
 
-    let normalized_models: Vec<Option<String>> = models
+    let mut focus_nodes = Vec::new();
+    let mut not_found = Vec::new();
+    for model in models {
+        if let Some(idx) = graph::filter::find_node_by_name(state.dag(), &model)? {
+            focus_nodes.push(idx);
+        } else {
+            not_found.push(model);
+        }
+    }
+    let resolved_models: Vec<_> = focus_nodes
         .iter()
-        .map(|model| resolve_node_unique_id(state, model))
+        .map(|&idx| state.dag()[idx].unique_id.clone())
         .collect();
-    let not_found: Vec<String> = models
-        .iter()
-        .zip(normalized_models.iter())
-        .filter(|(_, normalized)| normalized.is_none())
-        .map(|(original, _)| original.clone())
-        .collect();
-    let resolved_models: Vec<String> = normalized_models.into_iter().flatten().collect();
-    let filtered = if resolved_models.is_empty() {
+    let filtered = if focus_nodes.is_empty() {
         Default::default()
     } else {
-        graph::filter::filter_graph(
+        graph::filter::filter_graph_by_indices(
             state.dag(),
-            &resolved_models,
+            &focus_nodes,
             upstream,
             downstream,
             &[],
@@ -466,9 +477,8 @@ pub(super) fn get_lineage(args: &Value, state: &McpState) -> Result<Value> {
 
 pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
     let model = required_string(args, "model")?;
-    let normalized = resolve_node_unique_id(state, model).unwrap_or_else(|| model.to_string());
-    let idx = graph::filter::try_resolve_node_quiet(state.dag(), &normalized)
-        .with_context(|| format!("model not found: {model}"))?;
+    let idx = graph::filter::resolve_node_by_name(state.dag(), model)?;
+    let normalized = &state.dag()[idx].unique_id;
     if args.get("node_types").is_some_and(Value::is_null) {
         anyhow::bail!("argument 'node_types' must be an array");
     }
@@ -496,7 +506,7 @@ pub(super) fn get_impact(args: &Value, state: &McpState) -> Result<Value> {
         20,
         ordered.len(),
         state.manifest_hash,
-        ("get_impact", &normalized, detail, report.node_types()),
+        ("get_impact", normalized, detail, report.node_types()),
     )?;
     let nodes = &ordered[page.range()];
     let mut value = json!({
@@ -651,12 +661,6 @@ pub(super) fn get_column_lineage(args: &Value, state: &McpState) -> Result<Value
         }
         _ => anyhow::bail!("direction must be 'upstream' or 'downstream'"),
     }
-}
-
-pub(super) fn resolve_node_unique_id(state: &McpState, name: &str) -> Option<String> {
-    graph::filter::resolve_node_by_name(state.dag(), name)
-        .ok()
-        .map(|idx| state.dag()[idx].unique_id.clone())
 }
 
 pub(super) fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
