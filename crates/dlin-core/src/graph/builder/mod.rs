@@ -552,6 +552,29 @@ fn process_sql_edges(
         .chain(files.test_sql_files.iter().map(|p| (p, "test")))
         .collect();
 
+    // Read and extract the snapshots and singular tests concurrently, as
+    // the models were; the loop below records them in order and reports a
+    // read error where it reaches that file. A snapshot without a node is
+    // skipped there, so it is not read here either.
+    let pending: Vec<&std::path::PathBuf> = all_sql_files
+        .iter()
+        .filter(|(path, file_type)| match *file_type {
+            "model" => false,
+            "test" => true,
+            _ => gb
+                .node_map
+                .contains_key(&format!("{}.{}", file_type, file_stem_str(path))),
+        })
+        .map(|(path, _)| *path)
+        .collect();
+    let mut extracted: HashMap<std::path::PathBuf, Result<DependencyExtraction>> = pending
+        .par_iter()
+        .map(|path| {
+            let extraction = read_file(path).map(|content| extract_sql(&content, library, vars));
+            ((*path).clone(), extraction)
+        })
+        .collect();
+
     for (sql_path, file_type) in &all_sql_files {
         let node_name = file_stem_str(sql_path);
         let node_unique_id = format!("{}.{}", file_type, node_name);
@@ -597,13 +620,15 @@ fn process_sql_edges(
             }
         };
 
-        // Model files were extracted already; extract the others here.
+        // Model files were extracted already, and the others above.
         let owned;
         let extraction = match model_dependencies.get(*sql_path) {
             Some(extraction) => extraction,
             None => {
-                let content = read_file(sql_path)?;
-                owned = extract_sql(&content, library, vars);
+                owned = match extracted.remove(*sql_path) {
+                    Some(extraction) => extraction?,
+                    None => extract_sql(&read_file(sql_path)?, library, vars),
+                };
                 &owned
             }
         };

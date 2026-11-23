@@ -9,7 +9,7 @@ impl<'a> Interp<'a> {
         self.template = Some(body);
         let state = State::new(
             vec![Scope::new()],
-            BTreeMap::new(),
+            Heap::default(),
             Output::Discard,
             Causes::default(),
         );
@@ -64,7 +64,9 @@ impl<'a> Interp<'a> {
                 otherwise,
             } => {
                 let value = self.eval(st, cond)?;
-                let state = st.clone();
+                // The branches can only end normally or run out of budget,
+                // so `st` is not read again.
+                let state = st.take();
                 return match self.truth(&state, &value, cond.span) {
                     Truth::Known(true) => {
                         self.scan_skipped(otherwise);
@@ -89,7 +91,14 @@ impl<'a> Interp<'a> {
                 span,
             } => {
                 let iterable = self.eval(st, iter)?;
-                let state = st.clone();
+                // A filter or an attribute target is evaluated in the loop and
+                // can `return`, which returns from the statement with `st`, so
+                // keep it then.
+                let state = if filter.is_none() && !target.evaluates() {
+                    st.take()
+                } else {
+                    st.clone()
+                };
                 return self
                     .exec_for(
                         state,
@@ -144,7 +153,7 @@ impl<'a> Interp<'a> {
                 return Ok(Some(flow));
             }
             Stmt::AutoEscape { body } => {
-                let state = st.clone();
+                let state = st.take();
                 return self.exec_block(state, body).map(Some);
             }
             Stmt::Macro(def) => {
@@ -167,13 +176,13 @@ impl<'a> Interp<'a> {
             }
             Stmt::Break => {
                 return Ok(Some(Flow {
-                    brk: Some(st.clone()),
+                    brk: Some(st.take()),
                     ..Flow::default()
                 }));
             }
             Stmt::Continue => {
                 return Ok(Some(Flow {
-                    cont: Some(st.clone()),
+                    cont: Some(st.take()),
                     ..Flow::default()
                 }));
             }
@@ -383,7 +392,12 @@ impl<'a> Interp<'a> {
         }
         let fallback = Causes::default();
         let length = passing.len();
-        let mut current = Some(st.clone());
+        // The entry state is needed again only for the `else` path of an
+        // uncertain filter.
+        let (mut current, entry) = match uncertain {
+            Some(_) => (Some(st.clone()), Some(st)),
+            None => (Some(st), None),
+        };
         let mut exits = Flow::default();
         for (index, (item, maybe)) in passing.into_iter().enumerate() {
             let Some(mut state) = current.take() else {
@@ -406,9 +420,8 @@ impl<'a> Interp<'a> {
             exits.ret = merge_ret(exits.ret, flow.ret, &fallback);
         }
         let mut normal = merge_opt(current, exits.brk.take(), &fallback);
-        if let Some(causes) = &uncertain {
+        if let (Some(causes), Some(mut skipped)) = (&uncertain, entry) {
             // If no item passes the filter, `else` runs.
-            let mut skipped = st;
             skipped.path = skipped.path.union(causes);
             let else_flow = self.exec_block(skipped, else_body)?;
             normal = merge_opt(normal, else_flow.normal, causes);
