@@ -1,8 +1,10 @@
 use crate::parser::manifest::Manifest;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::relation::{RelationRef, RelationResolution, matching_indices, resolve_unique};
-use super::types::{cited_evidence, merge_evidence, normalize_boundaries, normalize_unresolved};
+use super::types::{
+    SlotNameIndex, cited_evidence, merge_evidence, normalize_boundaries, normalize_unresolved,
+};
 use super::{
     ColumnLineageAnalysis, EvidenceId, InternalColumnSource, InternalModelColumnLineage,
     ModelOutputRef, ModelPathHop, OutputSlotId, SchemaEvidenceRecord, SlotLookup, TraceBoundary,
@@ -39,19 +41,29 @@ pub(super) fn compute_cross_model_column_lineage<'a, 'm>(
     analysis: &'a mut ColumnLineageAnalysis<'m>,
     model_name: &str,
 ) -> InternalModelColumnLineage {
-    let mut ctx = CrossModelContext { analysis };
+    let mut ctx = CrossModelContext {
+        analysis,
+        slot_names: HashMap::new(),
+    };
     compute_cross_model_inner(model_name, &mut ctx)
 }
 
 struct CrossModelContext<'a, 'm> {
     analysis: &'a mut ColumnLineageAnalysis<'m>,
+    /// The output names of each upstream model the trace has entered. Every
+    /// root slot that reaches a model looks a name up in it.
+    slot_names: HashMap<String, SlotNameIndex>,
 }
 
 fn compute_cross_model_inner(
     model_name: &str,
     ctx: &mut CrossModelContext<'_, '_>,
 ) -> InternalModelColumnLineage {
-    let mut result = super::compute_column_lineage_internal(ctx.analysis, model_name);
+    // The root's lineage is rewritten below, so it is the one copy taken.
+    let mut result = std::sync::Arc::unwrap_or_clone(super::compute_column_lineage_internal(
+        ctx.analysis,
+        model_name,
+    ));
     let Some(root_node) = find_model_by_unique_id(ctx.analysis.manifest, model_name)
         .or_else(|| find_model_by_name(ctx.analysis.manifest, model_name))
     else {
@@ -432,12 +444,14 @@ fn resolve_source_recursive(
 
     let upstream_result = super::compute_column_lineage_internal(ctx.analysis, &model_unique_id);
     acc.ledger.extend(upstream_result.evidence.iter().cloned());
-    let lookup = upstream_result
-        .output
-        .as_ref()
-        .map_or(SlotLookup::Absent, |output| {
-            output.lookup(&source.column, ctx.analysis.dialect)
-        });
+    let lookup = match upstream_result.output.as_ref() {
+        Some(output) => ctx
+            .slot_names
+            .entry(model_unique_id.clone())
+            .or_insert_with(|| output.name_index(ctx.analysis.dialect))
+            .lookup(&source.column),
+        None => SlotLookup::Absent,
+    };
 
     // Only a failure of the whole model and the diagnostics of the slot that
     // is followed may cross this model boundary. A diagnostic for another

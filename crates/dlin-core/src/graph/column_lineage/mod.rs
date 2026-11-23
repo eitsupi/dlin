@@ -1,5 +1,6 @@
 use crate::parser::manifest::{Manifest, ManifestNode};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 mod backend;
 mod cache;
@@ -105,7 +106,9 @@ pub struct ColumnLineageAnalysis<'a> {
     semantic_digests: SemanticDigestCache,
     seeds: Option<&'a SeedSchemas>,
     schema: SchemaContext<'a>,
-    lineage_results: HashMap<String, InternalModelColumnLineage>,
+    /// Each model's own lineage, shared rather than copied: the cross-model
+    /// trace enters an upstream model once for every root slot that reaches it.
+    lineage_results: HashMap<String, Arc<InternalModelColumnLineage>>,
 }
 
 impl<'a> ColumnLineageAnalysis<'a> {
@@ -137,8 +140,7 @@ impl<'a> ColumnLineageAnalysis<'a> {
     }
 
     pub fn compute_column_lineage(&mut self, model_name: &str) -> ModelColumnLineage {
-        self.compute_column_lineage_internal(model_name)
-            .into_public()
+        Arc::unwrap_or_clone(self.compute_column_lineage_internal(model_name)).into_public()
     }
 
     pub fn compute_cross_model_column_lineage(&mut self, model_name: &str) -> ModelColumnLineage {
@@ -157,7 +159,7 @@ impl<'a> ColumnLineageAnalysis<'a> {
     pub(super) fn compute_column_lineage_internal(
         &mut self,
         model_name: &str,
-    ) -> InternalModelColumnLineage {
+    ) -> Arc<InternalModelColumnLineage> {
         compute_column_lineage_internal(self, model_name)
     }
 }
@@ -220,7 +222,7 @@ fn compute_column_impact_with_scope(
 pub(super) fn compute_column_lineage_internal(
     analysis: &mut ColumnLineageAnalysis<'_>,
     model_name: &str,
-) -> InternalModelColumnLineage {
+) -> Arc<InternalModelColumnLineage> {
     let manifest = analysis.manifest;
     let dialect = analysis.dialect;
     let node = find_model_by_unique_id(manifest, model_name)
@@ -236,7 +238,7 @@ pub(super) fn compute_column_lineage_internal(
                     .map(|node| node.unique_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return InternalModelColumnLineage::failed(
+                return Arc::new(InternalModelColumnLineage::failed(
                     model_name,
                     model_name,
                     ColumnLineageError::model(
@@ -245,7 +247,7 @@ pub(super) fn compute_column_lineage_internal(
                             "model name '{model_name}' is ambiguous; use a unique_id: {candidates}"
                         ),
                     ),
-                );
+                ));
             }
             let mut snapshots = manifest
                 .nodes
@@ -273,11 +275,11 @@ pub(super) fn compute_column_lineage_internal(
                         format!("snapshot '{}' has no compiled SQL definition", node.name),
                     )
                 };
-                return InternalModelColumnLineage::failed(
+                return Arc::new(InternalModelColumnLineage::failed(
                     &node.unique_id,
                     &node.name,
                     ColumnLineageError::model(kind, message),
-                );
+                ));
             }
             if snapshots.len() > 1 {
                 let candidates = snapshots
@@ -285,7 +287,7 @@ pub(super) fn compute_column_lineage_internal(
                     .map(|node| node.unique_id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ");
-                return InternalModelColumnLineage::failed(
+                return Arc::new(InternalModelColumnLineage::failed(
                     model_name,
                     model_name,
                     ColumnLineageError::model(
@@ -294,9 +296,9 @@ pub(super) fn compute_column_lineage_internal(
                             "snapshot name '{model_name}' is ambiguous; use a unique_id: {candidates}"
                         ),
                     ),
-                );
+                ));
             }
-            return InternalModelColumnLineage::failed(
+            return Arc::new(InternalModelColumnLineage::failed(
                 model_name,
                 model_name,
                 ColumnLineageError {
@@ -306,20 +308,20 @@ pub(super) fn compute_column_lineage_internal(
                         format!("model '{}' not found in manifest", model_name),
                     )
                 },
-            );
+            ));
         }
     };
 
     let display_name = node.name.as_str();
     let cache_key = node.unique_id.as_str();
     if let Some(cached) = analysis.lineage_results.get(cache_key) {
-        return cached.clone();
+        return Arc::clone(cached);
     }
 
     let compiled_code = match &node.compiled_code {
         Some(code) => code,
         None => {
-            return InternalModelColumnLineage::failed(
+            return Arc::new(InternalModelColumnLineage::failed(
                 cache_key,
                 display_name,
                 ColumnLineageError {
@@ -332,7 +334,7 @@ pub(super) fn compute_column_lineage_internal(
                         format!("model '{}' has no compiled_code", display_name),
                     )
                 },
-            );
+            ));
         }
     };
 
@@ -347,10 +349,10 @@ pub(super) fn compute_column_lineage_internal(
             .cache
             .get(cache_key, dialect, semantic_digest.value)
     {
-        let cached = cached.clone();
+        let cached = Arc::new(cached.clone());
         analysis
             .lineage_results
-            .insert(cache_key.to_string(), cached.clone());
+            .insert(cache_key.to_string(), Arc::clone(&cached));
         return cached;
     }
 
@@ -358,12 +360,12 @@ pub(super) fn compute_column_lineage_internal(
 
     let parsed = match parse_sql(compiled_code, dialect) {
         Ok(parsed) => parsed,
-        Err(message) => return parse_failure(node, message),
+        Err(message) => return Arc::new(parse_failure(node, message)),
     };
     let analyzed = analyze_parsed(&parsed, dialect, catalog.as_ref());
     let statement = match single_lineage_statement(&analyzed) {
         Ok(statement) => statement,
-        Err(failure) => return statement_failure(node, failure),
+        Err(failure) => return Arc::new(statement_failure(node, failure)),
     };
 
     // The SQL output is the only source of output slots. Columns that the
@@ -398,9 +400,10 @@ pub(super) fn compute_column_lineage_internal(
             .cache
             .insert(cache_key, dialect, semantic_digest.value, result.clone());
     }
+    let result = Arc::new(result);
     analysis
         .lineage_results
-        .insert(cache_key.to_string(), result.clone());
+        .insert(cache_key.to_string(), Arc::clone(&result));
     result
 }
 

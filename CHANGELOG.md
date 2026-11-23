@@ -9,6 +9,7 @@
 ### Performance
 
 - Look up each relation's columns once per SQL analysis and find a column by an index of its names, instead of rebuilding and scanning the column list for every column reference. Column lineage without a cache no longer grows with the square of a model's width; a single-column upstream query on 8 chained models of 200 columns took about half the time
+- Share each model's own column lineage within a run instead of copying it at every model boundary, and find an upstream output by an index of its names. Tracing no longer grows with the square of the width; on 8 chained models of 200 columns, a single-column upstream query took about 45 ms instead of 490 ms without a cache, and 21 ms instead of 200 ms with a warm cache
 
 ### Bug Fixes
 

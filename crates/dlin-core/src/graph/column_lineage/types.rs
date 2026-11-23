@@ -426,6 +426,38 @@ pub enum SlotLookup {
     Absent,
 }
 
+impl SlotLookup {
+    /// The lookup result for the ids of the slots that have the name, in
+    /// slot order.
+    fn from_matches(matches: Vec<OutputSlotId>) -> Self {
+        match matches.as_slice() {
+            [] => SlotLookup::Absent,
+            [id] => SlotLookup::Unique(*id),
+            _ => SlotLookup::Ambiguous(matches),
+        }
+    }
+}
+
+/// The slots of one output by the dialect's column key, built once for a
+/// model that a trace enters many times. `None` when the dialect has no
+/// engine dialect, where no name matches.
+pub(crate) struct SlotNameIndex(Option<(sqllineage::Dialect, HashMap<String, Vec<OutputSlotId>>)>);
+
+impl SlotNameIndex {
+    /// The same answer as [`OutputSlots::lookup`] on the indexed slots.
+    pub(crate) fn lookup(&self, name: &Ident) -> SlotLookup {
+        let Some((engine, slots)) = &self.0 else {
+            return SlotLookup::Absent;
+        };
+        SlotLookup::from_matches(
+            slots
+                .get(&name.engine_key(*engine))
+                .cloned()
+                .unwrap_or_default(),
+        )
+    }
+}
+
 impl<S> OutputSlots<S> {
     /// The slot with this id.
     pub fn slot(&self, id: OutputSlotId) -> Option<&OutputSlot<S>> {
@@ -452,11 +484,25 @@ impl<S> OutputSlots<S> {
             })
             .map(|slot| slot.id)
             .collect();
-        match matches.as_slice() {
-            [] => SlotLookup::Absent,
-            [id] => SlotLookup::Unique(*id),
-            _ => SlotLookup::Ambiguous(matches),
+        SlotLookup::from_matches(matches)
+    }
+
+    /// Index the slots by name for repeated lookups. Looking a name up in the
+    /// index gives the same answer as [`Self::lookup`].
+    pub(crate) fn name_index(&self, dialect: DlinDialect) -> SlotNameIndex {
+        let Ok(engine) = dialect.to_engine_dialect() else {
+            return SlotNameIndex(None);
+        };
+        let mut slots: HashMap<String, Vec<OutputSlotId>> = HashMap::new();
+        for slot in &self.columns {
+            if let Some(ident) = slot.name.ident() {
+                slots
+                    .entry(ident.engine_key(engine))
+                    .or_default()
+                    .push(slot.id);
+            }
         }
+        SlotNameIndex(Some((engine, slots)))
     }
 
     /// The diagnostic for a lookup of `name` that did not find exactly one
