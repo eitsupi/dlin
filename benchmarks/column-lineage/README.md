@@ -45,6 +45,19 @@ After preflight, run a bounded scale measurement with `uv run --locked python sc
 
 Publish the formal local scale results with `uv run --locked python scripts/summarize_scalability_results.py`.
 
+## Checking how dlin scales
+
+For dlin development, `scripts/measure_dlin_scaling.py` times one or more dlin binaries on the wide, deep and fan-out profiles, without a cache and with a warm cache, and prints the time ratio to the previous profile of the same family next to the ratio of their scales: the wide and deep profiles double at each step and the fan-out profiles grow fourfold. A time ratio at or below the scale ratio means the query time grows linearly or better. It also checks that every binary and cache mode returns the same JSON value (formatting and key order aside; array order counts), so a change meant only for speed can be checked not to change results:
+
+```sh
+cargo build --release --bin dlin
+uv run --locked python scripts/measure_dlin_scaling.py \
+  --dlin before=/path/to/previous/dlin \
+  --dlin after=../../target/release/dlin
+```
+
+It generates missing profiles from the real artifacts, so run `./scripts/regenerate_artifacts.sh` first. It is not a published comparison and does not run the preflight.
+
 ## Provenance and license
 
 The fixture structure was informed by [GnosisChain dbt-cerebro](https://github.com/gnosischain/dbt-cerebro), MIT License, Copyright 2024 hdser. This project does not copy its SQL, model names, or data. The fixture material is released under the MIT License; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
