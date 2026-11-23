@@ -19,6 +19,9 @@ pub(crate) struct RawGraph {
     /// What decides the fields of an output column that may be a STRUCT. A
     /// star over the column expands these.
     pub struct_values: HashMap<NodeId, StructValue>,
+    /// Paths below a column reference. The reference itself retains the
+    /// binding and supplies the fallback when a field cannot be identified.
+    pub field_paths: HashMap<NodeId, Vec<Ident>>,
     pub as_value_scopes: HashSet<scope::ScopeId>,
     pub empty_projection: Option<crate::Diagnostic>,
     pub scopes: ScopeTree,
@@ -49,6 +52,7 @@ impl RawGraph {
             edges: Vec::new(),
             output_names: HashMap::new(),
             struct_values: HashMap::new(),
+            field_paths: HashMap::new(),
             as_value_scopes: HashSet::new(),
             target_columns: Vec::new(),
             empty_projection: None,

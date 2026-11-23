@@ -18,7 +18,7 @@ mod join;
 mod options;
 mod slot;
 
-pub(super) use build::{ModelStore, OutputModels};
+pub(super) use build::{FieldLookup, ModelStore, OutputModels};
 pub(super) use choose::Choice;
 use input::Invalidity;
 pub(super) use input::RowAliasTarget;

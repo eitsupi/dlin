@@ -11,12 +11,13 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::binding::{derive_transform, resolve_captured_binding, unqualified_column_sources};
-use super::context::EvalContext;
+use super::context::{EvalContext, EvalKey};
 use super::lineage::{collect_leaf_origins, collect_output_sources};
 use super::mapping::{known_empty_dependency, merge_transform, wildcard_mapping};
 use super::model::{
-    Choice, ColumnSlot, InputLookup, ModelStore, OpaqueReason, OutputElement, OutputModel,
-    OutputModels, OutputRef, RangeRef, RowAliasTarget, SegmentId, UnknownProvider, ValueId,
+    Choice, ColumnSlot, FieldLookup, InputLookup, ModelStore, OpaqueReason, OutputElement,
+    OutputModel, OutputModels, OutputRef, RangeRef, RowAliasTarget, SegmentId, UnknownProvider,
+    ValueId,
 };
 use super::target::{StarTarget, resolve_star_target};
 use slot_eval::cut_segment;
@@ -93,6 +94,34 @@ pub(super) fn named_scope_sources(
     cx: &mut EvalContext<'_, '_>,
 ) -> Option<(Sources, bool, TransformKind)> {
     Evaluator { cx }.named(target_scope, name)
+}
+
+pub(super) fn field_lookup(reference: NodeId, cx: &mut EvalContext<'_, '_>) -> FieldLookup {
+    Evaluator { cx }.models().field_value(reference)
+}
+
+pub(super) fn field_sources(
+    reference: NodeId,
+    value: &ValueId,
+    evidence: &Evidence,
+    cx: &mut EvalContext<'_, '_>,
+) -> (Sources, bool, TransformKind) {
+    let key = EvalKey::Node(reference);
+    if !cx.enter(key) {
+        let origin = ColumnOrigin::Unresolved(Unresolved::Unbound {
+            column: cx.graph.field_paths[&reference].last().unwrap().clone(),
+        });
+        return (Sources::one(origin), false, TransformKind::Direct);
+    }
+    let mut evaluator = Evaluator { cx };
+    let (sources, has_back, transform) = if let ValueId::Expr(node) = value {
+        evaluator.expression(*node)
+    } else {
+        let (sources, transform) = evaluator.value(value);
+        (sources, false, transform)
+    };
+    cx.leave(key);
+    (sources.relying_on(evidence), has_back, transform)
 }
 
 /// What an unqualified name in the FROM clause at `env` denotes, with the

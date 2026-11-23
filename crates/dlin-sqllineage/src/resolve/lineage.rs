@@ -6,7 +6,8 @@ use super::binding::{
 };
 use super::context::{EvalContext, EvalKey};
 use super::mapping::{known_empty_dependency, merge_transform};
-use super::star::named_scope_sources;
+use super::model::FieldLookup;
+use super::star::{field_lookup, field_sources, named_scope_sources};
 
 use crate::Ident;
 use crate::graph::RawGraph;
@@ -91,6 +92,31 @@ pub(super) fn collect_leaf_origins(
     if let Some(origin) = super::binding::ambiguous_qualified_origin(node_id, graph) {
         return (Sources::one(origin), false, TransformKind::Direct);
     }
+    if graph.field_paths.contains_key(&node_id) {
+        match field_lookup(node_id, cx) {
+            FieldLookup::Found(value, evidence) => {
+                return field_sources(node_id, &value, &evidence, cx);
+            }
+            FieldLookup::Missing(column, evidence) => {
+                let (mut sources, has_back, transform) =
+                    collect_reference_origins(node_id, cx, visited);
+                sources.push(ColumnOrigin::Unresolved(crate::Unresolved::Unbound {
+                    column,
+                }));
+                return (sources.relying_on(&evidence), has_back, transform);
+            }
+            FieldLookup::Unknown => {}
+        }
+    }
+    collect_reference_origins(node_id, cx, visited)
+}
+
+fn collect_reference_origins(
+    node_id: NodeId,
+    cx: &mut EvalContext<'_, '_>,
+    visited: &mut HashSet<NodeId>,
+) -> (Sources, bool, TransformKind) {
+    let graph = cx.graph;
     if let Some(result) = resolve_input_reference(node_id, cx) {
         return result;
     }
