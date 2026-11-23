@@ -75,14 +75,15 @@ pub struct ImpactSource {
 #[derive(Debug, Clone, Serialize)]
 pub struct ImpactReport {
     pub source_model: String,
-    pub overall_severity: ImpactSeverity,
+    node_types: Vec<&'static str>,
+    pub overall_severity: Option<ImpactSeverity>,
     pub affected_models: usize,
-    pub affected_tests: usize,
+    pub affected_tests: Option<usize>,
     pub affected_exposures: usize,
     pub exposure_paths: Vec<ExposurePath>,
     /// True if any exposure had more paths than the enumeration cap
     pub exposure_paths_truncated: bool,
-    /// The nodes reached from the source through the edges of the graph.
+    /// The selected nodes reached from the source through the edges of the graph.
     /// The set may contain nodes reached through an edge that is only a
     /// guess; `exploration` states whether it can miss a node.
     ///
@@ -105,9 +106,9 @@ pub struct ImpactReport {
 #[cfg(test)]
 pub(crate) struct ImpactReportParts {
     pub source_model: String,
-    pub overall_severity: ImpactSeverity,
+    pub overall_severity: Option<ImpactSeverity>,
     pub affected_models: usize,
-    pub affected_tests: usize,
+    pub affected_tests: Option<usize>,
     pub affected_exposures: usize,
     pub exposure_paths: Vec<ExposurePath>,
     pub exposure_paths_truncated: bool,
@@ -121,6 +122,10 @@ impl From<ImpactReportParts> for ImpactReport {
     fn from(parts: ImpactReportParts) -> Self {
         Self {
             source_model: parts.source_model,
+            node_types: NodeType::RESOURCE_TYPES
+                .iter()
+                .map(NodeType::label)
+                .collect(),
             overall_severity: parts.overall_severity,
             affected_models: parts.affected_models,
             affected_tests: parts.affected_tests,
@@ -135,6 +140,11 @@ impl From<ImpactReportParts> for ImpactReport {
 }
 
 impl ImpactReport {
+    /// The resource types covered by the result and its exploration.
+    pub fn node_types(&self) -> &[&'static str] {
+        &self.node_types
+    }
+
     /// The nodes reached from the source, most severe first.
     pub fn impacted_nodes(&self) -> &[ImpactedNode] {
         &self.impacted_nodes
@@ -155,7 +165,7 @@ impl ImpactReport {
         self.exploration = exploration;
     }
 
-    /// Whether the report proves that the source affects no node: nothing
+    /// Whether the report proves that the source affects no selected node: nothing
     /// was reached and the model dependency exploration is complete.
     ///
     /// False when the search did not run, as for a phantom source. Accepting
@@ -212,12 +222,28 @@ pub fn classify_severity(node: &NodeData) -> ImpactSeverity {
     }
 }
 
+/// The default impact scope covers every public resource type except tests.
+pub fn default_impact_node_types() -> Vec<NodeType> {
+    NodeType::RESOURCE_TYPES
+        .into_iter()
+        .filter(|kind| *kind != NodeType::Test)
+        .collect()
+}
+
 /// Compute the impact report of the node at `source_idx`, or `None` when
 /// the graph has no such node.
 ///
 /// The build's project gaps, which are not attributed to a node, each make
 /// the exploration incomplete.
-pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<ImpactReport> {
+pub fn compute_impact(
+    build: &GraphBuild,
+    source_idx: NodeIndex,
+    selected_types: &[NodeType],
+) -> Option<ImpactReport> {
+    let node_types: Vec<_> = NodeType::RESOURCE_TYPES
+        .into_iter()
+        .filter(|kind| selected_types.contains(kind))
+        .collect();
     let graph = build.graph();
     let project_gaps = build.project_gaps();
     let source_node = graph.node_weight(source_idx)?;
@@ -240,8 +266,12 @@ pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<Impac
             let neighbor = edge.target();
             if visited.insert(neighbor) {
                 let node = &graph[neighbor];
-                let severity = classify_severity(node);
                 let next_distance = distance + 1;
+                queue.push_back((neighbor, next_distance));
+                if !node_types.contains(&node.node_type) {
+                    continue;
+                }
+                let severity = classify_severity(node);
 
                 match node.node_type {
                     NodeType::Model => affected_models += 1,
@@ -266,8 +296,6 @@ pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<Impac
                     sql_content: None,
                     dependency_analysis: node.dependency_analysis.clone(),
                 });
-
-                queue.push_back((neighbor, next_distance));
             }
         }
     }
@@ -325,11 +353,7 @@ pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<Impac
             .then(a.distance.cmp(&b.distance))
     });
 
-    let overall_severity = impacted_nodes
-        .iter()
-        .map(|n| n.severity)
-        .max()
-        .unwrap_or(ImpactSeverity::Low);
+    let overall_severity = impacted_nodes.iter().map(|n| n.severity).max();
 
     // A phantom node stands for a reference that resolved to nothing; the
     // search from it is not a search from a node of the project. Its reached
@@ -340,15 +364,19 @@ pub fn compute_impact(build: &GraphBuild, source_idx: NodeIndex) -> Option<Impac
         vec![exploration::explore_model_dependencies(
             graph,
             &visited,
+            &node_types,
             project_gaps,
         )]
     };
 
     Some(ImpactReport {
         source_model,
+        node_types: node_types.iter().map(NodeType::label).collect(),
         overall_severity,
         affected_models,
-        affected_tests,
+        affected_tests: node_types
+            .contains(&NodeType::Test)
+            .then_some(affected_tests),
         affected_exposures,
         exposure_paths,
         exposure_paths_truncated,

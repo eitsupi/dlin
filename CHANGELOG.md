@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking Changes
+
+- Impact reports exclude tests by default. Completeness and no-impact proofs apply to the reported `node_types`. JSON uses null for `affected_tests` when tests are outside the selection and for `overall_severity` when the result is empty.
+- Rust API: `compute_impact` takes the selected node types.
+
+### Features
+
+- Select downstream resource types with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. Traversal uses the full graph in both SQL and manifest mode.
+
 ## [0.3.0-beta.1] - 2026-11-22
 
 ### Breaking Changes

@@ -5,6 +5,17 @@ expression: output
 [
   {
     "source_model": "stg_orders",
+    "node_types": [
+      "model",
+      "source",
+      "seed",
+      "snapshot",
+      "test",
+      "exposure",
+      "semantic_model",
+      "metric",
+      "saved_query"
+    ],
     "overall_severity": "critical",
     "affected_models": 1,
     "affected_tests": 1,

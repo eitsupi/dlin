@@ -548,17 +548,16 @@ fn build_subgraph_with_transitive(
 }
 
 /// Known node type labels for validation.
-pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &[
-    "model",
-    "source",
-    "seed",
-    "snapshot",
-    "test",
-    "exposure",
-    "semantic_model",
-    "metric",
-    "saved_query",
-];
+pub const KNOWN_NODE_TYPE_LABELS: &[&str] = &{
+    let types = NodeType::RESOURCE_TYPES;
+    let mut labels = [""; NodeType::RESOURCE_TYPES.len()];
+    let mut i = 0;
+    while i < types.len() {
+        labels[i] = types[i].label();
+        i += 1;
+    }
+    labels
+};
 
 /// Resolve the effective node type names from CLI arguments.
 ///
@@ -576,11 +575,7 @@ pub fn resolve_node_types(explicit: Option<Vec<String>>) -> Vec<String> {
 pub fn validate_node_type_names(type_names: &[String]) -> Vec<String> {
     type_names
         .iter()
-        .filter(|t| {
-            !KNOWN_NODE_TYPE_LABELS
-                .iter()
-                .any(|k| k.eq_ignore_ascii_case(t))
-        })
+        .filter(|t| NodeType::from_resource_label(t).is_none())
         .cloned()
         .collect()
 }

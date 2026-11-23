@@ -7,6 +7,8 @@ fn test_impact_warns_when_tests_affected() {
     let output = std::process::Command::new(binary_path())
         .args([
             "impact",
+            "--node-type",
+            "model,test,exposure",
             "stg_orders",
             "-p",
             fixture_dir().to_str().unwrap(),

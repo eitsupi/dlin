@@ -85,6 +85,7 @@ fn main() {
         }
         Command::Impact {
             model,
+            node_types,
             project_dir,
             output,
             source,
@@ -105,6 +106,7 @@ fn main() {
             } else {
                 commands::run_impact_command(
                     raw_inputs,
+                    node_types,
                     &project_dir,
                     &output,
                     &source,

@@ -30,18 +30,26 @@ pub fn render_impact_text_to_writer<W: Write>(report: &ImpactReport, w: &mut W) 
     )?;
     writeln!(w, "{}", "=".repeat(50))?;
 
-    let severity_str = report
-        .overall_severity
-        .label()
-        .to_uppercase()
-        .color(severity_color(report.overall_severity))
-        .bold();
-    writeln!(w, "Overall Severity: {}", severity_str)?;
+    writeln!(w, "Node Types: {}", report.node_types().join(", "))?;
+    if let Some(severity) = report.overall_severity {
+        let label = severity
+            .label()
+            .to_uppercase()
+            .color(severity_color(severity))
+            .bold();
+        writeln!(w, "Overall Severity: {label}")?;
+    } else {
+        writeln!(w, "Overall Severity: none")?;
+    }
     writeln!(w)?;
 
     writeln!(w, "{}", "Summary:".bold())?;
     writeln!(w, "  Affected models:    {}", report.affected_models)?;
-    writeln!(w, "  Affected tests:     {}", report.affected_tests)?;
+    if let Some(tests) = report.affected_tests {
+        writeln!(w, "  Affected tests:     {tests}")?;
+    } else {
+        writeln!(w, "  Affected tests:     out of scope")?;
+    }
     writeln!(w, "  Affected exposures: {}", report.affected_exposures)?;
     writeln!(w)?;
 
@@ -151,7 +159,7 @@ fn write_exploration<W: Write>(report: &ImpactReport, w: &mut W) -> io::Result<(
         )?;
         writeln!(
             w,
-            "  Nodes not listed below may still depend on {}.",
+            "  Other nodes in scope may still depend on {}.",
             report.source_model
         )?;
         for unique_id in nodes.iter().take(LISTED_GAP_NODES) {
@@ -204,9 +212,9 @@ mod tests {
     fn make_report() -> ImpactReport {
         ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
-            overall_severity: ImpactSeverity::Critical,
+            overall_severity: Some(ImpactSeverity::Critical),
             affected_models: 1,
-            affected_tests: 1,
+            affected_tests: Some(1),
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
@@ -303,9 +311,9 @@ mod tests {
     fn test_render_impact_text_empty() {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "isolated".to_string(),
-            overall_severity: ImpactSeverity::Low,
+            overall_severity: None,
             affected_models: 0,
-            affected_tests: 0,
+            affected_tests: Some(0),
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
@@ -320,6 +328,7 @@ mod tests {
         render_impact_text_to_writer(&report, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Impact Analysis: isolated"));
+        assert!(output.contains("Overall Severity: none"));
         assert!(output.contains("Affected models:    0"));
     }
 
@@ -341,9 +350,9 @@ mod tests {
     fn test_render_impact_text_medium_severity() {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_payments".to_string(),
-            overall_severity: ImpactSeverity::Medium,
+            overall_severity: Some(ImpactSeverity::Medium),
             affected_models: 2,
-            affected_tests: 0,
+            affected_tests: Some(0),
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
@@ -397,9 +406,9 @@ mod tests {
         let report1 = make_report();
         let report2 = ImpactReport::from(ImpactReportParts {
             source_model: "orders".to_string(),
-            overall_severity: ImpactSeverity::Low,
+            overall_severity: None,
             affected_models: 0,
-            affected_tests: 0,
+            affected_tests: Some(0),
             affected_exposures: 0,
             exposure_paths: vec![],
             exposure_paths_truncated: false,
@@ -445,9 +454,9 @@ mod tests {
     fn make_report_with_sql() -> ImpactReport {
         ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
-            overall_severity: ImpactSeverity::Critical,
+            overall_severity: Some(ImpactSeverity::Critical),
             affected_models: 1,
-            affected_tests: 1,
+            affected_tests: Some(1),
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
@@ -522,9 +531,9 @@ mod tests {
     fn test_render_impact_text_truncated_paths() {
         let report = ImpactReport::from(ImpactReportParts {
             source_model: "stg_orders".to_string(),
-            overall_severity: ImpactSeverity::Critical,
+            overall_severity: Some(ImpactSeverity::Critical),
             affected_models: 1,
-            affected_tests: 0,
+            affected_tests: Some(0),
             affected_exposures: 1,
             exposure_paths: vec![ExposurePath {
                 exposure_id: String::new(),
@@ -598,7 +607,7 @@ mod tests {
             "Exploration: incomplete (12 node(s) with unresolved dependencies; \
              1 skipped input(s); not assessed: semantic_dependencies)"
         ));
-        assert!(output.contains("Nodes not listed below may still depend on stg_orders."));
+        assert!(output.contains("Other nodes in scope may still depend on stg_orders."));
         assert!(output.contains("  model.m09\n"));
         assert!(!output.contains("model.m10"));
         assert!(output.contains("and 2 more; use -o json for every gap"));

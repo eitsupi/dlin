@@ -415,6 +415,7 @@ fn collect_sql_contents(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_impact_command(
     raw_inputs: Vec<String>,
+    node_types: Option<Vec<graph::types::NodeType>>,
     project_dir: &Path,
     output: &cli::ImpactOutputFormat,
     source: &SourceType,
@@ -460,11 +461,12 @@ pub(crate) fn run_impact_command(
         .filter(|m| seen.insert(m.clone()))
         .collect();
 
+    let node_types = node_types.unwrap_or_else(graph::impact::default_impact_node_types);
     let reports: Vec<_> = models
         .iter()
         .filter_map(|model| {
             let source_idx = graph::filter::try_resolve_node(dag, model)?;
-            graph::impact::compute_impact(&build, source_idx)
+            graph::impact::compute_impact(&build, source_idx, &node_types)
         })
         .collect();
 
@@ -472,7 +474,12 @@ pub(crate) fn run_impact_command(
         anyhow::bail!("no models found matching: {}", models.join(", "));
     }
 
-    warn_sql_mode_test_limitation(source, reports.iter().any(|r| r.affected_tests > 0));
+    warn_sql_mode_test_limitation(
+        source,
+        reports
+            .iter()
+            .any(|r| r.affected_tests.unwrap_or_default() > 0),
+    );
 
     match output {
         cli::ImpactOutputFormat::Text => {

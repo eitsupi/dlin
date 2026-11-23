@@ -197,7 +197,7 @@ fn impact_with_no_reached_node_reports_the_gap() {
     let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let report = &reports[0];
     assert_eq!(report["impacted_nodes"], serde_json::json!([]));
-    assert_eq!(report["overall_severity"], "low");
+    assert_eq!(report["overall_severity"], serde_json::Value::Null);
     assert_eq!(report["source_node"]["unique_id"], "model.stg_kind_x");
     let exploration = &report["exploration"][0];
     assert_eq!(exploration["kind"], "model_dependency");
@@ -319,5 +319,113 @@ fn missing_configured_path_keeps_the_report_complete() {
     assert_eq!(
         codes(&json_lines(&output)),
         ["configured_input_path_missing"]
+    );
+}
+
+#[test]
+fn impact_excludes_generic_tests_by_default() {
+    let tmp = small_project(&[
+        ("models/isolated.sql", "select 1 as id"),
+        ("models/upstream.sql", "select 1 as id"),
+        (
+            "models/with_macro.sql",
+            "select cast(1 as {{ dbt.type_string() }}) as id",
+        ),
+        (
+            "models/schema.yml",
+            "version: 2\nmodels:\n  - name: upstream\n    columns:\n      - name: id\n        tests: [not_null]\n",
+        ),
+    ]);
+    let output = run(tmp.path(), &["impact", "isolated", "-o", "json", "-q"]);
+    let default = exploration(&output);
+    let gaps = default["gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(gaps[0]["unique_id"], "model.with_macro");
+    assert_eq!(gaps[0]["reasons"][0]["type"], "unsupported_macro_namespace");
+
+    let output = run(
+        tmp.path(),
+        &[
+            "impact",
+            "isolated",
+            "--node-type",
+            "test",
+            "-o",
+            "json",
+            "-q",
+        ],
+    );
+    let tests = exploration(&output);
+    let gaps = tests["gaps"].as_array().unwrap();
+    assert_eq!(gaps.len(), 1);
+    assert_eq!(
+        gaps[0]["reasons"][0]["type"],
+        "generic_test_body_not_analyzed"
+    );
+
+    for (types, count) in [
+        (None, serde_json::Value::Null),
+        (Some("test"), serde_json::json!(1)),
+    ] {
+        let mut args = vec!["impact", "upstream", "-o", "json", "-q"];
+        if let Some(types) = types {
+            args.extend(["--node-type", types]);
+        }
+        let output = run(tmp.path(), &args);
+        let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reports[0]["affected_tests"], count);
+        let nodes = reports[0]["impacted_nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), usize::from(types.is_some()));
+        if let Some(node) = nodes.first() {
+            assert_eq!(node["node_type"], "test");
+        }
+    }
+}
+
+#[test]
+fn manifest_impact_traverses_edges_from_tests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let manifest = tmp.path().join("manifest.json");
+    std::fs::write(
+        &manifest,
+        r#"{
+            "nodes": {
+                "model.demo.root": {"unique_id": "model.demo.root", "name": "root", "resource_type": "model"},
+                "test.demo.bridge": {"unique_id": "test.demo.bridge", "name": "bridge", "resource_type": "test",
+                    "depends_on": {"nodes": ["model.demo.root"]}},
+                "model.demo.leaf": {"unique_id": "model.demo.leaf", "name": "leaf", "resource_type": "model",
+                    "depends_on": {"nodes": ["test.demo.bridge"]}}
+            }
+        }"#,
+    )
+    .unwrap();
+    let output = run(
+        tmp.path(),
+        &[
+            "impact",
+            "root",
+            "--source",
+            "manifest",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--no-cache",
+            "--node-type",
+            "model",
+            "-o",
+            "json",
+            "-q",
+        ],
+    );
+    let reports: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report = &reports[0];
+    assert_eq!(report["node_types"], serde_json::json!(["model"]));
+    assert_eq!(report["affected_tests"], serde_json::Value::Null);
+    let nodes = report["impacted_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["label"], "leaf");
+    assert_eq!(nodes[0]["distance"], 2);
+    assert_eq!(
+        report["exploration"][0]["gaps"],
+        serde_json::json!([{"type": "not_assessed", "scope": "manifest_dependencies"}])
     );
 }

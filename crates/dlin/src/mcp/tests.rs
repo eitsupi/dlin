@@ -506,6 +506,39 @@ fn impact_resolves_manifest_unique_id() {
     assert_eq!(value["source_model"], json!("orders"));
 }
 
+#[test]
+fn impact_cursors_bind_to_the_effective_node_types() {
+    let state = state();
+    let default = get_impact(&json!({"model": "orders"}), &state).unwrap();
+    assert_eq!(default["affected_tests"], json!(null));
+    assert_eq!(default["page"]["total"], 2);
+
+    let mut args =
+        json!({"model": "orders", "limit": 1, "node_types": ["test", "model", "exposure"]});
+    let first = get_impact(&args, &state).unwrap();
+    assert_eq!(first["node_types"], json!(["model", "test", "exposure"]));
+    assert_eq!(first["affected_tests"], 1);
+    let cursor = &first["page"]["next_cursor"];
+    assert!(cursor.is_string());
+    args["cursor"] = cursor.clone();
+    args["node_types"] = json!(["exposure", "model", "test", "model"]);
+    assert!(get_impact(&args, &state).is_ok());
+    args["node_types"] = json!(["model", "exposure"]);
+    assert!(
+        get_impact(&args, &state)
+            .unwrap_err()
+            .to_string()
+            .contains("cursor")
+    );
+    args["node_types"] = json!([]);
+    assert!(
+        get_impact(&args, &state)
+            .unwrap_err()
+            .to_string()
+            .contains("must not be empty")
+    );
+}
+
 /// Manifest dependencies are not assessed, so no detail level or page of an
 /// impact claims that nothing is affected. The resolved input is reported
 /// outside the page too.

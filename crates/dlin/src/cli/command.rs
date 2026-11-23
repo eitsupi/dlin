@@ -2,6 +2,14 @@ use std::path::PathBuf;
 
 use super::*;
 use clap::Subcommand;
+use dlin_core::graph::types::NodeType;
+
+fn parse_impact_node_type(value: &str) -> Result<NodeType, String> {
+    NodeType::from_resource_label(value).ok_or_else(|| {
+        let labels = dlin_core::graph::filter::KNOWN_NODE_TYPE_LABELS.join(", ");
+        format!("unknown node type '{value}'; expected one of: {labels}")
+    })
+}
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -16,7 +24,7 @@ pub enum Command {
         long_about = "\
 Compute downstream impact analysis for one or more models.
 
-Finds all downstream dependents and assigns severity levels:
+Reports downstream dependents of the selected node types and assigns severity levels:
   Critical  impacts exposures (dashboards, reports)
   High      impacts table/incremental materializations or mart models
   Medium    impacts staging or intermediate models
@@ -26,23 +34,21 @@ Text output: human-readable report with severity and distance (degree).
 JSON output: structured array of impact reports for CI/programmatic use.
 
 Completeness:
-  impacted_nodes are the nodes reached through the edges dlin found. They
+  impacted_nodes are the selected nodes reached through the edges dlin found. They
   may include nodes reached through an edge that is only a guess, and they
   can miss nodes whose dependencies dlin could not analyse.
-  exploration says whether the reached set can miss a node:
-    complete    no gap: no node outside the reached set may depend on it
-    incomplete  gaps lists why it may: a node outside the reached set
-                whose dependencies are partial (unresolved_dependencies,
-                with the node's reasons), an input skipped while reading
+  exploration says whether the result can miss a selected node:
+    complete    no gap that could hide a selected node
+    incomplete  gaps lists why it may: unresolved dependencies on a path
+                to an unreached target, an input skipped while reading
                 the project (input_skipped), or a scope not assessed at
                 all (not_assessed, e.g. manifest_dependencies: manifest
                 mode takes the manifest's dependencies as they are)
   An input that is an unresolved reference has an empty exploration.
   source_node and each impacted node carry their own dependency_analysis.
-  The report proves that nothing is affected only when impacted_nodes is
-  empty and every exploration is complete with no gaps. Do not read an
-  empty impacted_nodes alone as \"no impact\". The exit code does not
-  depend on completeness.
+  A proof of no impact applies only to the node_types in the report. It
+  requires an empty impacted_nodes list and a complete exploration.
+  The exit code does not depend on completeness.
 
 Stdin/pipe support:
   Accepts model names or file paths on stdin (one per line). \
@@ -59,6 +65,9 @@ Examples:
 
   # JSON output for CI integration
   dlin impact orders -o json
+
+  # Report downstream models and tests
+  dlin impact orders --node-type model,test
 
   # Multiple models at once
   dlin impact orders stg_orders -o json
@@ -96,6 +105,16 @@ Examples:
         /// Output format: text (default) or json
         #[arg(short = 'o', long, default_value = "text")]
         output: ImpactOutputFormat,
+
+        /// Select downstream node types (comma-separated, default: all except test)
+        #[arg(
+            long = "node-type",
+            value_delimiter = ',',
+            value_parser = parse_impact_node_type,
+            long_help = "Select downstream node types (comma-separated). Default: all except test.
+Available types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query."
+        )]
+        node_types: Option<Vec<NodeType>>,
 
         /// Data source: sql (default) or manifest
         #[arg(

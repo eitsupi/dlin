@@ -11,6 +11,7 @@ fn impact_of(
     compute_impact(
         &GraphBuild::from_parts(graph.clone(), project_gaps.to_vec()),
         source_idx,
+        &NodeType::RESOURCE_TYPES,
     )
 }
 
@@ -149,9 +150,9 @@ fn test_compute_impact() {
 
     assert_eq!(report.source_model, "stg_orders");
     assert_eq!(report.affected_models, 1); // orders
-    assert_eq!(report.affected_tests, 1); // orders_positive
+    assert_eq!(report.affected_tests, Some(1)); // orders_positive
     assert_eq!(report.affected_exposures, 1); // dashboard
-    assert_eq!(report.overall_severity, ImpactSeverity::Critical);
+    assert_eq!(report.overall_severity, Some(ImpactSeverity::Critical));
     assert_eq!(report.impacted_nodes.len(), 3);
 
     // Exposure path: stg_orders -> orders -> dashboard
@@ -174,7 +175,7 @@ fn test_compute_impact_leaf_node() {
 
     assert_eq!(report.source_model, "dashboard");
     assert_eq!(report.affected_models, 0);
-    assert_eq!(report.affected_tests, 0);
+    assert_eq!(report.affected_tests, Some(0));
     assert_eq!(report.affected_exposures, 0);
     assert!(report.impacted_nodes.is_empty());
     assert!(report.exposure_paths.is_empty());
@@ -193,7 +194,7 @@ fn test_impact_isolated_node() {
     let n = g.add_node(make_node("model.x", "x", NodeType::Model, None, None));
     let report = impact_of(&g, n, &[]).unwrap();
     assert_eq!(report.affected_models, 0);
-    assert_eq!(report.affected_tests, 0);
+    assert_eq!(report.affected_tests, Some(0));
     assert_eq!(report.affected_exposures, 0);
     assert!(report.impacted_nodes.is_empty());
 }
@@ -405,6 +406,46 @@ mod exploration {
         report.exploration[0].gaps()
     }
 
+    #[test]
+    fn scoped_exploration_keeps_partial_intermediates_and_project_gaps() {
+        let mut graph = LineageGraph::new();
+        let source = graph.add_node(model("model.src", vec![]));
+        let bridge = graph.add_node(node_with(
+            "test.bridge",
+            NodeType::Test,
+            DependencyAnalysis::new([namespaced("test.bridge", "dbt")]),
+        ));
+        let leaf = graph.add_node(model("model.leaf", vec![]));
+        graph.add_edge(bridge, leaf, EdgeData::direct(EdgeType::Test));
+        graph.add_node(node_with(
+            "test.unrelated",
+            NodeType::Test,
+            DependencyAnalysis::new([namespaced("test.unrelated", "dbt")]),
+        ));
+
+        let build = GraphBuild::from_parts(graph.clone(), vec![skipped()]);
+        let report = compute_impact(&build, source, &[NodeType::Model]).unwrap();
+        assert_eq!(report.node_types(), ["model"]);
+        assert_eq!(report.affected_tests, None);
+        assert_eq!(report.overall_severity, None);
+        assert!(!report.proves_no_impact());
+        assert_eq!(gaps(&report).len(), 2);
+        assert!(gaps(&report).contains(&ExplorationGap::from(skipped())));
+        assert!(matches!(
+            &gaps(&report)[0],
+            ExplorationGap::UnresolvedDependencies { unique_id, .. } if unique_id == "test.bridge"
+        ));
+
+        graph.add_edge(source, bridge, EdgeData::direct(EdgeType::Test));
+        let build = GraphBuild::from_parts(graph, vec![]);
+        let report = compute_impact(&build, source, &[NodeType::Model]).unwrap();
+        assert_eq!(report.impacted_nodes().len(), 1);
+        assert_eq!(report.impacted_nodes()[0].unique_id, "model.leaf");
+        assert_eq!(report.impacted_nodes()[0].distance, 2);
+        assert!(gaps(&report).is_empty());
+        assert!(report.is_acceptable_under(&DependencyPolicy::deny_all()));
+    }
+
     /// src -> a (partial) ; b (partial, unreached) ; c (complete, unreached)
     fn graph_with_partial_nodes() -> LineageGraph {
         let mut g = LineageGraph::new();
@@ -546,6 +587,7 @@ mod exploration {
         let report = compute_impact(
             &GraphBuild::from_manifest(g.clone()),
             find(&g, "model.only"),
+            &NodeType::RESOURCE_TYPES,
         )
         .unwrap();
         assert_eq!(
@@ -724,7 +766,7 @@ mod projects {
         let build =
             build_graph_report(&project_dir, &project.name, &discovered, &project.vars).unwrap();
         let idx = crate::graph::filter::try_resolve_node_quiet(build.graph(), input).unwrap();
-        compute_impact(&build, idx).unwrap()
+        compute_impact(&build, idx, &NodeType::RESOURCE_TYPES).unwrap()
     }
 
     fn gap_ids(report: &ImpactReport) -> Vec<String> {

@@ -5,6 +5,7 @@ expression: output
 
 Impact Analysis: stg_orders
 ==================================================
+Node Types: model, source, seed, snapshot, test, exposure, semantic_model, metric, saved_query
 Overall Severity: CRITICAL
 
 Summary:
