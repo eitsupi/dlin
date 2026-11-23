@@ -47,7 +47,7 @@ Publish the formal local scale results with `uv run --locked python scripts/summ
 
 ## Checking how dlin scales
 
-For dlin development, `scripts/measure_dlin_scaling.py` times one or more dlin binaries on the wide, deep and fan-out profiles, without a cache and with a warm cache, and prints the ratio to the previous profile of the same family. A ratio near 2 means the query time grows linearly as the width, depth or number of branches doubles. It also checks that every binary and cache mode returns the same JSON, so a change meant only for speed can be checked not to change results:
+For dlin development, `scripts/measure_dlin_scaling.py` times one or more dlin binaries on the wide, deep and fan-out profiles, without a cache and with a warm cache, and prints the time ratio to the previous profile of the same family next to the ratio of their scales: the wide and deep profiles double at each step and the fan-out profiles grow fourfold. A time ratio at or below the scale ratio means the query time grows linearly or better. It also checks that every binary and cache mode returns the same JSON value (formatting and key order aside; array order counts), so a change meant only for speed can be checked not to change results:
 
 ```sh
 cargo build --release --bin dlin

@@ -3,9 +3,9 @@
 
 This is a development check, not a published comparison. It times one or
 more dlin binaries on the synthetic profiles, with and without a warm cache,
-and prints each family with the ratio to the previous, smaller profile. When
-the time roughly doubles as the width, depth or number of branches doubles,
-the query scales linearly with it.
+and prints each family with the ratio to the previous, smaller profile next
+to the ratio of their scales. When the time ratio stays at or below the scale
+ratio, the query scales linearly with the width, depth or number of branches.
 
 It also compares the JSON output of every binary with that of the first one,
 so a change meant only to speed dlin up can be checked not to change results.
@@ -118,7 +118,12 @@ def run_output(command: list[str]) -> str:
 
 
 def digest(text: str) -> str:
-    return hashlib.sha256(text.encode()).hexdigest()
+    """A digest of the JSON value, so formatting and key order do not count.
+
+    Array order still counts: a change in the order of results is reported.
+    """
+    value = json.loads(text)
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def measure(binaries: list[tuple[str, str]], profiles: list[str], runs: int, warmup: int) -> dict:
@@ -166,7 +171,7 @@ def markdown(result: dict) -> str:
     for label in labels:
         header.extend([f"{label} no cache", f"{label} warm"])
     lines = [
-        f"Median of {result['runs']} runs after {result['warmup']} warmup; the ratio is to the previous profile of the same family and query.",
+        f"Median of {result['runs']} runs after {result['warmup']} warmup. Each ratio is to the previous profile of the same family and query, shown as time ratio / scale ratio: a time ratio at or below the scale ratio is linear or better.",
         "",
         "| " + " | ".join(header) + " |",
         "| --- | --- | ---: | " + " | ".join(["---:"] * (len(header) - 3)) + " |",
@@ -180,7 +185,8 @@ def markdown(result: dict) -> str:
                 seconds = row["times"][label][mode]
                 cell = f"{seconds * 1000:.1f} ms"
                 if before is not None:
-                    cell += f" ({seconds / before['times'][label][mode]:.2f}x)"
+                    scale = row["scale"] / before["scale"]
+                    cell += f" ({seconds / before['times'][label][mode]:.2f}x / {scale:g}x)"
                 cells.append(cell)
         lines.append("| " + " | ".join(cells) + " |")
         previous[(row["family"], row["query"])] = row
