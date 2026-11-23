@@ -842,3 +842,65 @@ fn catalog_known_set_arity_mismatch_is_an_analysis_error() {
         }]
     );
 }
+
+/// Counts the lookups of each relation and lists `c1` to `c50` for it.
+#[derive(Default)]
+struct CountingCatalog {
+    lookups: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+}
+
+const COUNTED_COLUMNS: [&str; 50] = [
+    "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12", "c13", "c14", "c15",
+    "c16", "c17", "c18", "c19", "c20", "c21", "c22", "c23", "c24", "c25", "c26", "c27", "c28",
+    "c29", "c30", "c31", "c32", "c33", "c34", "c35", "c36", "c37", "c38", "c39", "c40", "c41",
+    "c42", "c43", "c44", "c45", "c46", "c47", "c48", "c49", "c50",
+];
+
+impl Catalog for CountingCatalog {
+    fn lookup(&self, relation: &Relation) -> Option<CatalogEntry<'_>> {
+        *self
+            .lookups
+            .lock()
+            .unwrap()
+            .entry(relation.name.value.clone())
+            .or_default() += 1;
+        Some(catalog_entry(relation, &COUNTED_COLUMNS))
+    }
+}
+
+#[test]
+fn one_analysis_looks_up_each_relation_once() {
+    // Every column reference consults the catalog, so a wide query would
+    // otherwise look its relations up once per column.
+    let columns = COUNTED_COLUMNS
+        .iter()
+        .map(|name| format!("a.{name} as a_{name}, b.{name} as b_{name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("select {columns}, c1 from t1 as a join t2 as b using (c1)");
+    let catalog = CountingCatalog::default();
+    let analysis = configured(&sql, Dialect::DuckDb, Some(&catalog));
+
+    assert_eq!(
+        concrete_sources(find_mapping(&analysis.output.columns, "a_c50")),
+        vec![("t1".into(), "c50".into())]
+    );
+    let lookups = catalog.lookups.lock().unwrap().clone();
+    assert_eq!(
+        lookups,
+        [("t1".to_string(), 1), ("t2".to_string(), 1)]
+            .into_iter()
+            .collect()
+    );
+
+    // The entries live for one analysis: the next one asks the catalog again,
+    // so a catalog that changed in between is seen.
+    configured(&sql, Dialect::DuckDb, Some(&catalog));
+    let lookups = catalog.lookups.lock().unwrap().clone();
+    assert_eq!(
+        lookups,
+        [("t1".to_string(), 2), ("t2".to_string(), 2)]
+            .into_iter()
+            .collect()
+    );
+}

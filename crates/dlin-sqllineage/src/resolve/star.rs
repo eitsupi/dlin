@@ -551,7 +551,7 @@ impl Evaluator<'_, '_, '_> {
                                 .and_then(|catalog| catalog.entry(&table))
                                 .map_or_else(
                                     || super::analysis::plain_relation(&table),
-                                    |entry| entry.relation,
+                                    |entry| entry.relation.clone(),
                                 ),
                             column: catalog
                                 .and_then(|catalog| catalog.column(&table, &column))
