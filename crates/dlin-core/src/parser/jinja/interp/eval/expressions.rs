@@ -55,6 +55,8 @@ impl<'a> Interp<'a> {
         depth: usize,
         shared: bool,
     ) -> Result<Value, Causes> {
+        // Keep can_freeze's conservative success check in sync with these
+        // rules when changing which values can be frozen.
         // Containers can hold themselves; such values are not modelled.
         if depth > MAX_DEPTH {
             return Err(self.unsupported("deeply nested or cyclic container", span));
@@ -454,6 +456,11 @@ impl<'a> Interp<'a> {
         right: &AValue,
         span: Span,
     ) -> AValue {
+        if matches!(op, BinOp::In | BinOp::NotIn)
+            && let Some(contains) = string_membership(st, left, right)
+        {
+            return AValue::Known(Value::from(contains == (op == BinOp::In)));
+        }
         let inputs = [left.clone(), right.clone()];
         match self.freeze_all_shared(st, &inputs, span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
@@ -898,6 +905,63 @@ impl<'a> Interp<'a> {
     }
 }
 
+/// Check a string against a heap list or string-keyed map without building
+/// MiniJinja copies. Containment uses value equality for a list and key
+/// lookup for a map. Still check the entire container: an unfreezable value
+/// makes the original operation unknown even when the string was found.
+fn string_membership(st: &State, needle: &AValue, container: &AValue) -> Option<bool> {
+    let AValue::Known(needle) = needle else {
+        return None;
+    };
+    if needle.kind() != ValueKind::String {
+        return None;
+    }
+    let text = needle.as_str()?;
+    let AValue::Heap(id) = container else {
+        return None;
+    };
+    match st.heap.get(id)? {
+        HeapObj::List(items) => items.iter().try_fold(false, |found, item| match item {
+            AValue::Known(value) => Some(found || value == needle),
+            // A nested container cannot equal a string, but freezing it
+            // can still fail and make the whole comparison unknown.
+            _ => can_freeze(st, item, 1).then_some(found),
+        }),
+        HeapObj::Map(entries) => entries.iter().try_fold(false, |found, (key, value)| {
+            if key.kind() != ValueKind::String || !can_freeze(st, value, 1) {
+                return None;
+            }
+            Some((key.as_str()? == text) || found)
+        }),
+        _ => None,
+    }
+}
+
+/// Conservatively check whether [`Interp::freeze_at`] would succeed without
+/// materializing the value. A true result guarantees success; a false result
+/// falls back to the regular path, which may still succeed. Revisit this
+/// check whenever the success rules in `freeze_at` change.
+fn can_freeze(st: &State, value: &AValue, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return false;
+    }
+    match value {
+        AValue::Known(_) => true,
+        AValue::Heap(id) => {
+            let nested = |value| can_freeze(st, value, depth + 1);
+            match st.heap.get(id) {
+                Some(HeapObj::List(items)) => items.iter().all(nested),
+                Some(HeapObj::Map(entries)) => entries.iter().all(|(_, value)| nested(value)),
+                Some(HeapObj::Namespace(attrs)) => attrs.values().all(nested),
+                // freeze_at returns undefined for a missing ID. Let it
+                // handle that case instead of assuming a container exists.
+                Some(HeapObj::Clobbered(_)) | None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 /// A slice or a concatenation of sequences is a new list in Fusion, which
 /// minijinja computes lazily.
 pub(super) fn computed_list(value: Value) -> Value {
@@ -907,5 +971,171 @@ pub(super) fn computed_list(value: Value) -> Value {
     match value.try_iter() {
         Ok(items) => Value::from(items.take(MAX_ITEMS + 1).collect::<Vec<_>>()),
         Err(_) => value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn string_membership_agrees_with_minijinja() {
+        let library = MacroLibrary::default();
+        let vars = HashMap::new();
+        let mut interp = Interp::new(&library, "", &vars);
+        let mut st = State::new(
+            Vec::new(),
+            Heap::default(),
+            Output::Discard,
+            Causes::default(),
+        );
+        let span = Span::default_for_template();
+        let string = AValue::Known(Value::from("match"));
+        let number = AValue::Known(Value::from(1));
+        let boolean = AValue::Known(Value::from(true));
+        let bytes = AValue::Known(Value::from_bytes(b"match".to_vec()));
+        let none = AValue::none();
+        let undefined = AValue::undefined();
+        let causes = interp.unsupported("test value", span);
+        let unknown = AValue::Unknown(causes.clone());
+
+        let empty_list = interp.alloc(&mut st, HeapObj::List(Vec::new()));
+        let empty_map = interp.alloc(&mut st, HeapObj::Map(Vec::new()));
+        let namespace = interp.alloc(
+            &mut st,
+            HeapObj::Namespace(BTreeMap::from([(Arc::from("match"), empty_list.clone())])),
+        );
+        let scalars = interp.alloc(
+            &mut st,
+            HeapObj::List(vec![
+                string.clone(),
+                number.clone(),
+                boolean.clone(),
+                bytes.clone(),
+                none.clone(),
+                undefined.clone(),
+            ]),
+        );
+        let list_with_unknown = interp.alloc(
+            &mut st,
+            HeapObj::List(vec![string.clone(), unknown.clone()]),
+        );
+        let nested = interp.alloc(
+            &mut st,
+            HeapObj::List(vec![
+                empty_list.clone(),
+                empty_map.clone(),
+                namespace.clone(),
+            ]),
+        );
+        let nested_map = interp.alloc(
+            &mut st,
+            HeapObj::Map(vec![(Value::from("match"), nested.clone())]),
+        );
+        let map_with_unknown = interp.alloc(
+            &mut st,
+            HeapObj::Map(vec![(Value::from("match"), list_with_unknown.clone())]),
+        );
+        let mixed_keys = interp.alloc(
+            &mut st,
+            HeapObj::Map(vec![
+                (Value::from("match"), none.clone()),
+                (Value::from(1), none.clone()),
+                (Value::from_bytes(b"match".to_vec()), none.clone()),
+            ]),
+        );
+        let clobbered = interp.alloc(&mut st, HeapObj::Clobbered(causes));
+        let missing = AValue::Heap(HeapId::MAX);
+        let list_with_missing = interp.alloc(&mut st, HeapObj::List(vec![missing.clone()]));
+        let cyclic = interp.alloc(&mut st, HeapObj::List(Vec::new()));
+        let AValue::Heap(cycle_id) = cyclic else {
+            unreachable!()
+        };
+        st.heap
+            .insert(cycle_id, HeapObj::List(vec![cyclic.clone()]));
+        let mut at_limit = string.clone();
+        for _ in 0..MAX_DEPTH {
+            at_limit = interp.alloc(&mut st, HeapObj::List(vec![at_limit]));
+        }
+        let too_deep = interp.alloc(&mut st, HeapObj::List(vec![at_limit.clone()]));
+
+        let candidates = [
+            ("string", string, true, false),
+            ("number", number, true, false),
+            ("bool", boolean, true, false),
+            ("bytes", bytes, true, false),
+            ("none", none, true, false),
+            ("undefined", undefined, true, false),
+            ("empty list", empty_list, true, true),
+            ("empty map", empty_map, true, true),
+            ("mixed scalar list", scalars, true, true),
+            ("mixed map keys", mixed_keys, true, false),
+            ("namespace", namespace, true, false),
+            ("nested containers", nested, true, true),
+            ("nested map", nested_map, true, true),
+            ("unknown", unknown, false, false),
+            ("unknown list item", list_with_unknown, false, false),
+            ("nested unknown", map_with_unknown, false, false),
+            ("missing ID", missing, false, false),
+            ("list with missing ID", list_with_missing, false, false),
+            ("clobbered", clobbered, false, false),
+            ("cycle", cyclic, false, false),
+            ("at depth limit", at_limit, true, true),
+            ("past depth limit", too_deep, false, false),
+        ];
+
+        for (label, value, freezable, fast_for_string) in &candidates {
+            assert_eq!(can_freeze(&st, value, 0), *freezable, "{label}");
+            for depth in [0, 1, MAX_DEPTH, MAX_DEPTH + 1] {
+                if can_freeze(&st, value, depth) {
+                    assert!(
+                        interp.freeze_at(&st, value, span, depth, true).is_ok(),
+                        "{label} at depth {depth}"
+                    );
+                }
+            }
+
+            // Cross the containers with both matching and nonmatching strings
+            // and with the other scalar kinds (which take the regular path).
+            let needles = candidates[..6]
+                .iter()
+                .map(|(name, value, _, _)| (*name, value.clone()))
+                .chain([
+                    ("missing string", AValue::Known(Value::from("missing"))),
+                    (
+                        "safe string",
+                        AValue::Known(Value::from_safe_string("match".into())),
+                    ),
+                ]);
+            for (needle_label, needle) in needles {
+                let fast = string_membership(&st, &needle, value);
+                let is_string =
+                    matches!(&needle, AValue::Known(v) if v.kind() == ValueKind::String);
+                assert_eq!(
+                    fast.is_some(),
+                    *fast_for_string && is_string,
+                    "{needle_label} in {label}"
+                );
+                let Some(contains) = fast else { continue };
+                let frozen = interp
+                    .freeze_all_shared(&st, &[needle.clone(), value.clone()], span)
+                    .expect("fast path requires both operands to be freezable");
+                for op in [BinOp::In, BinOp::NotIn] {
+                    let expected = known::binary(op, &frozen[0], &frozen[1]).unwrap();
+                    let actual = interp.binary(&mut st, op, &needle, value, span);
+                    assert_eq!(Value::from(contains == (op == BinOp::In)), expected);
+                    assert!(
+                        actual.same(&AValue::Known(expected)),
+                        "{needle_label} {op:?} {label}"
+                    );
+                }
+            }
+        }
+        assert!(
+            interp
+                .freeze_at(&st, &AValue::Heap(HeapId::MAX), span, 0, true)
+                .unwrap()
+                .is_undefined()
+        );
     }
 }

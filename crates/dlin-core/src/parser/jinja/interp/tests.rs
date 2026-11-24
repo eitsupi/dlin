@@ -1499,3 +1499,84 @@ fn double_underscore_in_ordinary_macro_name_can_block_dispatch() {
     assert!(e.refs.is_empty());
     assert_eq!(codes(&e), ["unsupported_dispatch"]);
 }
+
+#[test]
+fn string_membership_tracks_container_contents_and_nested_unknowns() {
+    let e = extract(
+        r#"
+{% set entries = {'key': {'nested': [1]}} %}
+{% set alias = entries %}
+{% if 'key' in alias and 'missing' not in entries %}
+    {{ ref('known_map') }}
+{% endif %}
+{% do entries.update({'new': true}) %}
+{% if 'new' in alias and 1 in [1, 'other'] and 'str' in ['str', 2] %}
+    {{ ref('after_update') }}
+{% endif %}
+{% do alias.update({'unknown': {'nested': [target.name]}}) %}
+{% if 'key' in entries %}{{ ref('unknown_map') }}{% endif %}
+{% if 'str' in ['str', target.name] %}{{ ref('unknown_list') }}{% endif %}
+"#,
+    );
+    assert_eq!(
+        ref_names(&e),
+        ["after_update", "known_map", "unknown_list", "unknown_map"]
+    );
+    let conditional: Vec<_> = e
+        .decisions
+        .iter()
+        .filter(|d| d.outcome == DecisionOutcome::Accepted { conditional: true })
+        .map(|d| d.reference.as_ref().unwrap().name.as_str())
+        .collect();
+    assert_eq!(conditional, ["unknown_map", "unknown_list"]);
+    assert_eq!(codes(&e), ["runtime_value_unknown"]);
+}
+
+#[test]
+fn string_membership_ignores_known_nested_containers() {
+    let e = extract(
+        r#"
+{% set items = [['needle'], {'needle': [1]}, 'needle'] %}
+{% if 'needle' in items %}{{ ref('found') }}{% endif %}
+{% if 'needle' not in items %}{{ ref('missed') }}{% endif %}
+{% if 'needle' in items[:2] %}{{ ref('nested_match') }}{% endif %}
+{% if 'needle' not in items[:2] %}{{ ref('absent') }}{% endif %}
+"#,
+    );
+    assert_eq!(ref_names(&e), ["absent", "found"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn string_membership_preserves_nested_list_freeze_failures() {
+    let e = extract(
+        r#"
+{% if 'needle' in ['needle', {'nested': [target.name]}] %}
+    {{ ref('unknown') }}
+{% endif %}
+{% set ns = namespace(value=[]) %}
+{% for i in range(40) %}
+    {% set ns.value = [ns.value] %}
+{% endfor %}
+{% if 'needle' in ['needle', ns.value] %}
+    {{ ref('deep') }}
+{% endif %}
+"#,
+    );
+    assert_eq!(ref_names(&e), ["deep", "unknown"]);
+    assert_eq!(
+        codes(&e),
+        ["runtime_value_unknown", "unsupported_jinja_construct"]
+    );
+    assert!(e.reasons.iter().any(|reason| matches!(
+        reason,
+        DependencyReason::UnsupportedJinjaConstruct { construct, .. }
+            if construct == "deeply nested or cyclic container"
+    )));
+    assert!(
+        e.decisions
+            .iter()
+            .filter(|d| d.reference.is_some())
+            .all(|d| { d.outcome == DecisionOutcome::Accepted { conditional: true } })
+    );
+}
