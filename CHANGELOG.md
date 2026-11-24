@@ -34,6 +34,7 @@
 
 #### Model-level lineage
 
+- Interpret project variables, macro calls, loops and supported list and dict mutations when extracting dependencies from Jinja, so a dependency built by a macro or selected by a variable is found (#262, #263, #280)
 - Report typed `dependency_analysis` reasons per node in `list` and `impact` JSON, and in `graph` JSON with `--json-full` or `--json-fields dependency_analysis`. Impact reports identify the source node and include exploration gaps that could hide downstream nodes, including skipped inputs and unassessed scopes. The README documents how to check for no impact in CI (#258, #264, #281)
 - Report upstream exploration gaps in focused SQL-mode graph queries, including reached nodes with unresolved dependencies within the requested depth and skipped project inputs. Output filters preserve these diagnostics. The MCP `get_lineage` tool also reports them (#300)
 - Evaluate Jinja dependencies in generic test arguments, exposure `depends_on` entries, and YAML snapshot `relation` values (#264)
@@ -66,7 +67,7 @@
 
 ### Performance
 
-- Across 11 public dbt projects ([Tuva](https://github.com/tuva-health/tuva), [jaffle-shop](https://github.com/dbt-labs/jaffle-shop), [cal-itp data-infra](https://github.com/cal-itp/data-infra) and the Fivetran packages [dbt_hubspot](https://github.com/fivetran/dbt_hubspot), [dbt_jira](https://github.com/fivetran/dbt_jira), [dbt_netsuite](https://github.com/fivetran/dbt_netsuite), [dbt_quickbooks](https://github.com/fivetran/dbt_quickbooks), [dbt_salesforce](https://github.com/fivetran/dbt_salesforce), [dbt_shopify](https://github.com/fivetran/dbt_shopify), [dbt_stripe](https://github.com/fivetran/dbt_stripe), [dbt_zendesk](https://github.com/fivetran/dbt_zendesk)), `dlin list --source sql --no-cache -o json -q` took about 15–86% of the time of 0.2.6 in release builds. For example, dbt_shopify went from 557 ms to 81 ms and Tuva from 1,092 ms to 678 ms (#262, #263, #299, #304)
+- Across 11 public dbt projects ([Tuva](https://github.com/tuva-health/tuva), [jaffle-shop](https://github.com/dbt-labs/jaffle-shop), [cal-itp data-infra](https://github.com/cal-itp/data-infra) and the Fivetran packages [dbt_hubspot](https://github.com/fivetran/dbt_hubspot), [dbt_jira](https://github.com/fivetran/dbt_jira), [dbt_netsuite](https://github.com/fivetran/dbt_netsuite), [dbt_quickbooks](https://github.com/fivetran/dbt_quickbooks), [dbt_salesforce](https://github.com/fivetran/dbt_salesforce), [dbt_shopify](https://github.com/fivetran/dbt_shopify), [dbt_stripe](https://github.com/fivetran/dbt_stripe), [dbt_zendesk](https://github.com/fivetran/dbt_zendesk)), `dlin list --source sql --no-cache -o json -q` took about 15–86% of the time of 0.2.6 (release builds, median of five runs). For example, dbt_shopify went from 557 ms to 81 ms and Tuva from 1,092 ms to 678 ms (#262, #263, #299, #304)
 - Reduce the cost of tracing wide models. A single-column upstream query across eight chained models of 200 columns takes about 50 ms without a cache and 23 ms with a warm cache (#292, #293)
 
 ### Known Limitations
