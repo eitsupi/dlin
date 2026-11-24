@@ -12,6 +12,7 @@ fn at(unique_id: &str) -> NodeCallSite {
         path: "models/a.sql".to_string(),
         line: Some(3),
         expr: Some("dbt_utils.star(ref('b'))".to_string()),
+        var_template: None,
     }
 }
 

@@ -356,6 +356,7 @@ mod exploration {
             path: format!("models/{unique_id}.sql"),
             line: Some(1),
             expr: None,
+            var_template: None,
         }
     }
 

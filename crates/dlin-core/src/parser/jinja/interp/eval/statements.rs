@@ -55,9 +55,9 @@ impl<'a> Interp<'a> {
         match stmt {
             Stmt::Emit(expr) => {
                 let value = self.eval(st, expr)?;
-                self.emit(st, &value, expr.span);
+                self.emit(st, &value, expr.span)?;
             }
-            Stmt::Raw(text) => st.out.push_str(text),
+            Stmt::Raw(text) => self.append_output(st, text, None)?,
             Stmt::If {
                 cond,
                 then,
@@ -147,7 +147,7 @@ impl<'a> Interp<'a> {
                 let (captured, mut flow) = self.capture(st, body)?;
                 if let Some((mut state, value)) = captured {
                     let value = self.apply_filter_expr(&mut state, filter, value)?;
-                    self.emit(&mut state, &value, filter.span);
+                    self.emit(&mut state, &value, filter.span)?;
                     flow.normal = Some(state);
                 }
                 return Ok(Some(flow));
@@ -169,7 +169,7 @@ impl<'a> Interp<'a> {
                     closure: self.closure_here(st, &caller.names),
                 });
                 let value = self.eval_call(st, call, Some(caller))?;
-                self.emit(st, &value, call.span);
+                self.emit(st, &value, call.span)?;
             }
             Stmt::Do(call) => {
                 self.eval_call(st, call, None)?;
@@ -215,7 +215,7 @@ impl<'a> Interp<'a> {
 
     /// The closure of a macro or caller defined in the current frame.
     pub(super) fn closure_here(&self, st: &State, names: &[Arc<str>]) -> Closure {
-        if self.depth == 0 && st.scopes.len() == 1 {
+        if self.root_call.is_none() && st.scopes.len() == 1 {
             Closure::TemplateRoot
         } else {
             Closure::Captured(capture(st, names))
@@ -555,14 +555,29 @@ impl<'a> Interp<'a> {
         Ok(())
     }
 
-    pub(super) fn emit(&mut self, st: &mut State, value: &AValue, span: Span) {
+    fn emit(&mut self, st: &mut State, value: &AValue, span: Span) -> Ev<()> {
         if matches!(st.out, Output::Discard) {
-            return;
+            return Ok(());
         }
         match self.freeze(st, value, span) {
-            Ok(value) => st.out.push_str(&known::render(&value)),
+            Ok(value) => {
+                if let Some(text) = value.as_str() {
+                    self.append_output(st, text, Some(span))?;
+                } else {
+                    self.append_output(st, &known::render(&value), Some(span))?;
+                }
+            }
             Err(causes) => st.out.push_unknown(&causes),
         }
+        Ok(())
+    }
+
+    fn append_output(&mut self, st: &mut State, text: &str, span: Option<Span>) -> Ev<()> {
+        if !self.var_frames.is_empty() && matches!(st.out, Output::Known(_)) {
+            self.charge(text.len() as u64, span)?;
+        }
+        st.out.push_str(text);
+        Ok(())
     }
 
     /// Record the literal dependency calls of a branch that is not taken.

@@ -21,6 +21,15 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// The origin of a call reached while interpreting a var() template.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VarTemplateOrigin {
+    /// The variable names, from the outermost call to the current template.
+    pub names: Vec<String>,
+    /// 1-based line within the innermost template, when known.
+    pub line: Option<u32>,
+}
+
 /// Where a reason was raised, as known while extracting one SQL file.
 ///
 /// The owning node is not known yet at that point; the graph builder turns
@@ -31,6 +40,8 @@ pub struct ExtractionSite {
     pub line: Option<u32>,
     /// The call expression as written in the file, when known.
     pub expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_template: Option<VarTemplateOrigin>,
 }
 
 /// The call site in the node that uses a construct, for reasons raised by a
@@ -45,6 +56,8 @@ pub struct NodeCallSite {
     pub line: Option<u32>,
     /// The call expression as written in `path`, when known.
     pub expr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub var_template: Option<VarTemplateOrigin>,
 }
 
 impl ExtractionSite {
@@ -55,6 +68,7 @@ impl ExtractionSite {
             path: path.into(),
             line: self.line,
             expr: self.expr,
+            var_template: self.var_template,
         }
     }
 }
@@ -104,6 +118,7 @@ pub enum RuntimeValueSource {
 #[serde(rename_all = "snake_case")]
 pub enum AnalysisLimit {
     RecursionDepth,
+    VarTemplateParseBudget,
     WorkBudget,
 }
 
@@ -168,6 +183,8 @@ pub enum DependencyReason<L> {
     },
     /// A `var()` without a value or default.
     UnresolvedVar { name: Option<String>, at: L },
+    /// A configured variable was read while its template was being rendered.
+    CyclicVarTemplate { at: L },
     /// An `adapter.dispatch()` call, which the analysis does not resolve.
     UnsupportedDispatch {
         name: Option<String>,
@@ -247,6 +264,7 @@ pub enum DependencyReasonCode {
     UnresolvedRef,
     UnresolvedSource,
     UnresolvedVar,
+    CyclicVarTemplate,
     UnsupportedDispatch,
     UnsupportedMacroNamespace,
     UnresolvedCall,
@@ -270,6 +288,7 @@ impl DependencyReasonCode {
         Self::UnresolvedRef,
         Self::UnresolvedSource,
         Self::UnresolvedVar,
+        Self::CyclicVarTemplate,
         Self::UnsupportedDispatch,
         Self::UnsupportedMacroNamespace,
         Self::UnresolvedCall,
@@ -292,6 +311,7 @@ impl DependencyReasonCode {
             Self::UnresolvedRef => "unresolved_ref",
             Self::UnresolvedSource => "unresolved_source",
             Self::UnresolvedVar => "unresolved_var",
+            Self::CyclicVarTemplate => "cyclic_var_template",
             Self::UnsupportedDispatch => "unsupported_dispatch",
             Self::UnsupportedMacroNamespace => "unsupported_macro_namespace",
             Self::UnresolvedCall => "unresolved_call",
@@ -329,6 +349,7 @@ impl<L> DependencyReason<L> {
             Self::UnresolvedRef { .. } => DependencyReasonCode::UnresolvedRef,
             Self::UnresolvedSource { .. } => DependencyReasonCode::UnresolvedSource,
             Self::UnresolvedVar { .. } => DependencyReasonCode::UnresolvedVar,
+            Self::CyclicVarTemplate { .. } => DependencyReasonCode::CyclicVarTemplate,
             Self::UnsupportedDispatch { .. } => DependencyReasonCode::UnsupportedDispatch,
             Self::UnsupportedMacroNamespace { .. } => {
                 DependencyReasonCode::UnsupportedMacroNamespace
@@ -373,6 +394,7 @@ impl<L> DependencyReason<L> {
             Self::UnresolvedRef { at, .. }
             | Self::UnresolvedSource { at, .. }
             | Self::UnresolvedVar { at, .. }
+            | Self::CyclicVarTemplate { at }
             | Self::UnsupportedDispatch { at, .. }
             | Self::UnsupportedMacroNamespace { at, .. }
             | Self::UnresolvedCall { at, .. }
@@ -412,6 +434,7 @@ impl<L> DependencyReason<L> {
                 at: f(at),
             },
             R::UnresolvedVar { name, at } => R::UnresolvedVar { name, at: f(at) },
+            R::CyclicVarTemplate { at } => R::CyclicVarTemplate { at: f(at) },
             R::UnsupportedDispatch {
                 name,
                 namespace,

@@ -426,3 +426,142 @@ snapshots:
     assert_eq!(graph.edge_count(), 1);
     assert!(graph.contains_edge(upstream_idx, downstream_idx));
 }
+
+#[test]
+fn var_templates_in_sql_record_dependencies_when_called() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let models_dir = project_dir.join("models");
+    fs::create_dir_all(&models_dir).unwrap();
+    fs::write(
+        project_dir.join("dbt_project.yml"),
+        r#"
+name: var_templates
+vars:
+  relation: "{{ source('raw', 'fallback') }}"
+  var_templates:
+    relation: "{{ source('raw', 'accounts') }}"
+  other_package:
+    relation: "{{ source('raw', 'fallback') }}"
+  chain: "{{ var('relation') }}"
+  cycle_a: "{{ var('cycle_b') }}"
+  cycle_b: "{{ var('cycle_a') }}"
+  invalid: "{% if %}"
+  opaque: "{{ missing_macro() }}"
+  filter: "{{ 'x' | missing_filter }}"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        models_dir.join("sources.yml"),
+        r#"
+version: 2
+sources:
+  - name: raw
+    tables:
+      - name: accounts
+      - name: fallback
+"#,
+    )
+    .unwrap();
+
+    let cases = [
+        (
+            "direct",
+            r#"select * from {{ var('relation') }}"#,
+            &["raw.accounts"][..],
+            &[][..],
+        ),
+        (
+            "unused_result",
+            r#"{% set ignored = var('relation') %} select 1"#,
+            &["raw.accounts"][..],
+            &[][..],
+        ),
+        ("uncalled", r#"select 1"#, &[][..], &[][..]),
+        (
+            "configured",
+            r#"select * from {{ var('relation', "{{ source('raw', 'fallback') }}") }}"#,
+            &["raw.accounts"][..],
+            &[][..],
+        ),
+        (
+            "selected_default",
+            r#"select * from {{ var('missing', "{{ source('raw', 'fallback') }}") }}"#,
+            &["raw.fallback"][..],
+            &[][..],
+        ),
+        (
+            "chain",
+            r#"select * from {{ var('chain') }}"#,
+            &["raw.accounts"][..],
+            &[][..],
+        ),
+        (
+            "partial",
+            r#"select * from {{ var('chain') }}
+{% set ignored = var('cycle_a') %}
+{% set ignored = var('invalid') %}
+{% set ignored = var('opaque') %}
+{% set ignored = var('filter') %}"#,
+            &["raw.accounts"][..],
+            &[
+                "cyclic_var_template",
+                "jinja_render_failed",
+                "unresolved_call",
+                "unsupported_jinja_construct",
+            ][..],
+        ),
+    ];
+    for (name, sql, _, _) in cases {
+        fs::write(models_dir.join(format!("{name}.sql")), sql).unwrap();
+    }
+    let project = crate::parser::project::DbtProject::load(project_dir).unwrap();
+    let paths = project.resolve_paths(project_dir);
+    let files = crate::parser::discovery::discover_files(&paths).unwrap();
+    let graph = build_graph(project_dir, "var_templates", &files, &project.vars).unwrap();
+
+    for (name, _, expected_upstream, expected_reasons) in cases {
+        let consumer = graph
+            .node_indices()
+            .find(|&i| graph[i].label == name)
+            .unwrap();
+        let mut upstream: Vec<_> = graph
+            .neighbors_directed(consumer, petgraph::Direction::Incoming)
+            .map(|i| graph[i].label.as_str())
+            .collect();
+        upstream.sort_unstable();
+        assert_eq!(upstream, expected_upstream, "{name}");
+
+        let json = serde_json::to_value(&graph[consumer].dependency_analysis).unwrap();
+        let status = if expected_reasons.is_empty() {
+            "complete"
+        } else {
+            "partial"
+        };
+        assert_eq!(json["status"], status, "{name}");
+        if !expected_reasons.is_empty() {
+            let mut reasons: Vec<_> = json["unresolved"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["type"].as_str().unwrap())
+                .collect();
+            reasons.sort_unstable();
+            assert_eq!(reasons, expected_reasons);
+            let cycle = json["unresolved"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["type"] == "cyclic_var_template")
+                .unwrap();
+            assert_eq!(cycle["at"]["path"], "models/partial.sql");
+            assert_eq!(cycle["at"]["line"], 2);
+            assert_eq!(
+                cycle["at"]["var_template"]["names"],
+                serde_json::json!(["cycle_a", "cycle_b", "cycle_a"])
+            );
+            assert!(cycle["at"]["expr"].is_null());
+        }
+    }
+}

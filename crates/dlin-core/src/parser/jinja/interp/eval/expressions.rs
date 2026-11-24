@@ -142,7 +142,7 @@ impl<'a> Interp<'a> {
     pub(crate) fn eval(&mut self, st: &mut State, expr: &Expr) -> Ev<AValue> {
         self.tick(Some(expr.span))?;
         let span = expr.span;
-        Ok(match &expr.kind {
+        let value = match &expr.kind {
             ExprKind::Var(name) => self.lookup(st, name, span),
             ExprKind::Const(value) => AValue::Known(value.clone()),
             ExprKind::Slice {
@@ -330,7 +330,16 @@ impl<'a> Interp<'a> {
                     None => self.alloc(st, HeapObj::Map(entries)),
                 }
             }
-        })
+        };
+        if !self.var_frames.is_empty()
+            && let AValue::Unknown(causes) = &value
+            && causes
+                .iter()
+                .any(|cause| matches!(cause, DependencyReason::UnsupportedJinjaConstruct { .. }))
+        {
+            self.record_used(st, causes);
+        }
+        Ok(value)
     }
 
     /// Evaluate two alternatives selected by an unknown condition, each on

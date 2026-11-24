@@ -81,6 +81,7 @@ pub(super) fn process_semantic_layer(
                     path: gb.display_path(yaml_path),
                     line: None,
                     expr: Some(model_ref.trim().to_string()),
+                    var_template: None,
                 };
                 gb.add_reasons(
                     sem_idx,

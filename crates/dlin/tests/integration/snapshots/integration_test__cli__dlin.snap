@@ -9,12 +9,13 @@ Parses SQL files directly to extract ref() and source() dependencies (no dbt com
 Data sources:
   sql (default)   Interpret the Jinja in SQL files. No Python or dbt required.
                   Detects ref() and source() calls in SQL, plus exposures from YAML.
-                  var() uses vars.yml or dbt_project.yml, then its default; CLI
-                  --vars overrides are not supported. env_var() uses its default and
-                  never reads the environment, so a different run-time value can
-                  select another dependency or branch. Values known only at run time
-                  (target, env_var() without a default, run_query() results) do not
-                  select dependencies; execute is false, as in dbt parsing.
+                  var() uses vars.yml or dbt_project.yml, then its default. It renders
+                  a selected Jinja string when called. CLI --vars overrides are not
+                  supported. env_var() uses its default and never reads the
+                  environment, so a different run-time value can select another
+                  dependency or branch. Values known only at run time (target,
+                  env_var() without a default, run_query() results) do not select
+                  dependencies; execute is false, as in dbt parsing.
                   Dependencies selected through adapter.dispatch() or namespaced
                   package macros (e.g. dbt_utils.*) may be missed; the nodes
                   concerned are reported as partial (see dependency_analysis).

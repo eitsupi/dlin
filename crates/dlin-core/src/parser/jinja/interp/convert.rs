@@ -27,6 +27,39 @@ pub(crate) fn parse_template(source: &str, id: SourceId) -> Result<Template, Par
     parse_with_offsets(source, id, OffsetMap::default())
 }
 
+pub(super) enum VarTemplateParseError {
+    Budget,
+    Syntax(ParseFailure),
+}
+
+/// Bound the parser input and the size of the AST before converting it.
+/// MiniJinja also limits recursive syntax, but a flat token sequence can
+/// still produce a deep tree (for example a chain of binary operators).
+pub(super) fn parse_var_template(
+    source: &str,
+    available_tokens: usize,
+) -> Result<(Template, usize), VarTemplateParseError> {
+    const MAX_BYTES: usize = 16 * 1024;
+    if source.len() > MAX_BYTES {
+        return Err(VarTemplateParseError::Budget);
+    }
+    let mut token_count = 0;
+    for token in minijinja::machinery::tokenize(source, false, SyntaxConfig::default()) {
+        if token_count == available_tokens {
+            return Err(VarTemplateParseError::Budget);
+        }
+        token.map_err(|error| {
+            VarTemplateParseError::Syntax(ParseFailure {
+                line: error.line().and_then(|line| u32::try_from(line).ok()),
+            })
+        })?;
+        token_count += 1;
+    }
+    let template =
+        parse_template(source, SourceId::VarTemplate).map_err(VarTemplateParseError::Syntax)?;
+    Ok((template, token_count))
+}
+
 /// Parse a macro file and convert it to IR.
 ///
 /// A macro file may also define generic tests with dbt's

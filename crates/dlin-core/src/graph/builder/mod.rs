@@ -127,7 +127,11 @@ impl<'a> GraphBuilder<'a> {
             unique_id: unique_id.to_string(),
             path: path.clone(),
             line: None,
-            expr: site.expr.clone().or_else(|| Some(text.trim().to_string())),
+            expr: site
+                .expr
+                .clone()
+                .or_else(|| site.var_template.is_none().then(|| text.trim().to_string())),
+            var_template: site.var_template.clone(),
         };
         YamlDependencies {
             refs: extraction
@@ -831,6 +835,7 @@ fn add_generic_test_node(
                     path: gb.display_path(yaml_path),
                     line: None,
                     expr: None,
+                    var_template: None,
                 },
             },
         ]),
@@ -1143,6 +1148,21 @@ pub fn build_graph_report(
 ) -> Result<GraphBuild> {
     let mut skipped = files.skipped_inputs.clone();
     let library = load_macro_library(files, &mut skipped);
+    // SQL mode analyses the root project. Its own package-scoped vars
+    // override the global entries for all nodes analysed in this scope.
+    let scoped_vars = vars
+        .get(project_name)
+        .and_then(serde_json::Value::as_object)
+        .map(|overrides| {
+            let mut resolved = vars.clone();
+            resolved.extend(
+                overrides
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            resolved
+        });
+    let vars = scoped_vars.as_ref().unwrap_or(vars);
     let mut gb = GraphBuilder::new(project_dir, project_name, &library, vars);
 
     let yaml_result = project_yaml::process_yaml_files(&mut gb, files, project_dir, &mut skipped)?;

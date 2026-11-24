@@ -457,6 +457,11 @@ fn describe(reason: &NodeDependencyReason) -> (String, &'static str, &'static st
             MAY_OMIT_OR_ADD,
             "set the variable in dbt_project.yml or give the call a default",
         ),
+        R::CyclicVarTemplate { .. } => (
+            "a var() template refers back to a variable still being rendered".to_string(),
+            MAY_OMIT_OR_ADD,
+            "break the cycle between variable templates",
+        ),
         R::UnsupportedDispatch {
             name, namespace, ..
         } => (
@@ -512,7 +517,7 @@ fn describe(reason: &NodeDependencyReason) -> (String, &'static str, &'static st
                     .unwrap_or_default()
             ),
             MAY_OMIT_OR_ADD,
-            "check for deeply recursive macros",
+            "check for recursive macros and large or deeply nested variable templates",
         ),
         R::RuntimeValueUnknown { source, name, .. } => (
             format!(
@@ -596,6 +601,12 @@ fn reason_diagnostic(unique_id: &str, reason: &NodeDependencyReason) -> Diagnost
             let mut location = at.path.clone();
             if let Some(line) = at.line {
                 location.push_str(&format!(":{line}"));
+            }
+            if let Some(origin) = &at.var_template {
+                location.push_str(&format!(", var() template {:?}", origin.names));
+                if let Some(line) = origin.line {
+                    location.push_str(&format!(" line {line}"));
+                }
             }
             match &at.expr {
                 Some(expr) => format!("{unique_id} ({location}, `{expr}`): {description}"),

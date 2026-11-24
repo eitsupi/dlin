@@ -583,6 +583,7 @@ mod tests {
                     path: "models/m.sql".to_string(),
                     line: None,
                     expr: None,
+                    var_template: None,
                 },
             }],
         };

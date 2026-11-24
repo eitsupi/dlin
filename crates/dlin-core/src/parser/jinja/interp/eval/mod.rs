@@ -21,6 +21,7 @@ use super::value::{
 };
 use crate::graph::dependency::{
     AnalysisLimit, DependencyFunction, DependencyReason, ExtractionSite, RuntimeValueSource,
+    VarTemplateOrigin,
 };
 use crate::parser::sql::{RefCall, SourceCall, SqlConfig, normalize_version_str};
 
@@ -32,6 +33,7 @@ mod expressions;
 mod methods;
 mod scan;
 mod statements;
+mod var_template;
 
 pub(crate) use scan::{StaticCalls, collect_set_literals};
 
@@ -175,6 +177,10 @@ pub(crate) struct Interp<'a> {
     pub(crate) incremental: bool,
     pub(crate) steps: u64,
     depth: usize,
+    var_frames: Vec<var_template::VarFrame>,
+    var_template_tokens: usize,
+    /// The location captured before unwinding a var() template on budget exhaustion.
+    pub(crate) budget_site: Option<ExtractionSite>,
     /// The call in the template that entered the current macro chain.
     root_call: Option<Span>,
     /// The last expression evaluated, for reporting where the budget ran out.
@@ -203,6 +209,9 @@ impl<'a> Interp<'a> {
             incremental: false,
             steps: 0,
             depth: 0,
+            var_frames: Vec::new(),
+            var_template_tokens: 0,
+            budget_site: None,
             root_call: None,
             current: None,
             next_heap: 0,
@@ -219,11 +228,22 @@ impl<'a> Interp<'a> {
     /// The location to report for something at `span`: the span itself in
     /// the template body, or the call that entered the macro chain.
     pub(crate) fn site(&self, span: Span) -> ExtractionSite {
-        let span = if self.depth == 0 {
-            span
-        } else {
-            self.root_call.unwrap_or(span)
-        };
+        let span = self.root_call.unwrap_or(span);
+        if let Some(outer) = self.var_frames.first() {
+            return ExtractionSite {
+                line: outer.call_line,
+                expr: None,
+                var_template: Some(VarTemplateOrigin {
+                    names: self
+                        .var_frames
+                        .iter()
+                        .map(|frame| frame.name.clone())
+                        .collect(),
+                    line: (span.source == SourceId::VarTemplate && span.line != 0)
+                        .then_some(span.line),
+                }),
+            };
+        }
         if span.source != SourceId::Template {
             return ExtractionSite::default();
         }
@@ -234,6 +254,7 @@ impl<'a> Interp<'a> {
         ExtractionSite {
             line: Some(span.line),
             expr,
+            var_template: None,
         }
     }
 
@@ -277,7 +298,11 @@ impl<'a> Interp<'a> {
     }
 
     fn tick(&mut self, span: Option<Span>) -> Ev<()> {
-        self.steps += 1;
+        self.charge(1, span)
+    }
+
+    fn charge(&mut self, steps: u64, span: Option<Span>) -> Ev<()> {
+        self.steps += steps;
         if span.is_some() {
             self.current = span;
         }
@@ -303,6 +328,7 @@ fn may_be_callable(causes: &Causes) -> bool {
             reason,
             DependencyReason::RuntimeValueUnknown { .. }
                 | DependencyReason::UnresolvedVar { .. }
+                | DependencyReason::CyclicVarTemplate { .. }
                 | DependencyReason::UnresolvedRef { .. }
                 | DependencyReason::UnresolvedSource { .. }
                 | DependencyReason::InvalidDependencyCall { .. }

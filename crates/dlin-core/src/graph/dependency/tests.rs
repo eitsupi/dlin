@@ -5,6 +5,7 @@ fn site() -> ExtractionSite {
     ExtractionSite {
         line: Some(3),
         expr: Some("kind_x_relation()".to_string()),
+        var_template: None,
     }
 }
 
@@ -30,6 +31,7 @@ fn every_reason() -> Vec<ExtractedDependencyReason> {
             name: None,
             at: site(),
         },
+        R::CyclicVarTemplate { at: site() },
         R::UnsupportedDispatch {
             name: Some("kind_x_relation".into()),
             namespace: None,
