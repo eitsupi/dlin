@@ -454,6 +454,11 @@ impl<'a> Interp<'a> {
         right: &AValue,
         span: Span,
     ) -> AValue {
+        if matches!(op, BinOp::In | BinOp::NotIn)
+            && let Some(contains) = string_membership(st, left, right)
+        {
+            return AValue::Known(Value::from(contains == (op == BinOp::In)));
+        }
         let inputs = [left.clone(), right.clone()];
         match self.freeze_all_shared(st, &inputs, span) {
             Ok(values) => match known::binary(op, &values[0], &values[1]) {
@@ -895,6 +900,57 @@ impl<'a> Interp<'a> {
             .collect();
         st.clobber_reachable(&inputs, &causes);
         AValue::Unknown(causes)
+    }
+}
+
+/// Check a string against a heap list or string-keyed map without building
+/// MiniJinja copies. Containment uses value equality for a list and key
+/// lookup for a map. Still check the entire container: an unfreezable value
+/// makes the original operation unknown even when the string was found.
+fn string_membership(st: &State, needle: &AValue, container: &AValue) -> Option<bool> {
+    let AValue::Known(needle) = needle else {
+        return None;
+    };
+    if needle.kind() != ValueKind::String {
+        return None;
+    }
+    let text = needle.as_str()?;
+    let AValue::Heap(id) = container else {
+        return None;
+    };
+    match st.heap.get(id)? {
+        HeapObj::List(items) => items.iter().try_fold(false, |found, item| match item {
+            AValue::Known(value) => Some(found || value == needle),
+            _ => None,
+        }),
+        HeapObj::Map(entries) => entries.iter().try_fold(false, |found, (key, value)| {
+            if key.kind() != ValueKind::String || !can_freeze(st, value, 1) {
+                return None;
+            }
+            Some((key.as_str()? == text) || found)
+        }),
+        _ => None,
+    }
+}
+
+/// Prove that freezing this value would succeed without materializing it.
+/// Leave unknown values and depth failures to the regular diagnostic path.
+fn can_freeze(st: &State, value: &AValue, depth: usize) -> bool {
+    if depth > MAX_DEPTH {
+        return false;
+    }
+    match value {
+        AValue::Known(_) => true,
+        AValue::Heap(id) => {
+            let nested = |value| can_freeze(st, value, depth + 1);
+            match st.heap.get(id) {
+                Some(HeapObj::List(items)) => items.iter().all(nested),
+                Some(HeapObj::Map(entries)) => entries.iter().all(|(_, value)| nested(value)),
+                Some(HeapObj::Namespace(attrs)) => attrs.values().all(nested),
+                Some(HeapObj::Clobbered(_)) | None => false,
+            }
+        }
+        _ => false,
     }
 }
 
