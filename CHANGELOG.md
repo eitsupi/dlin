@@ -1,128 +1,77 @@
 # Changelog
 
-## [0.3.0-rc.2] - 2026-11-23
-
-### Changes
-
-- Column-level lineage is no longer Experimental. Results that cannot be traced completely are still reported as partial with the reason and the place where tracing stopped (#290)
-
-### Performance
-
-- Column lineage of wide models no longer grows with the square of the width. Each SQL analysis looks up a relation's columns once and finds them by name through an index, and a run shares each model's lineage instead of copying it at every model boundary. On 8 chained models of 200 columns, a single-column upstream query takes about 50 ms instead of 490 ms without a cache, and about 23 ms instead of 200 ms with a warm cache (#292, #293)
-
-### Bug Fixes
-
-- Trace the whole value of BigQuery `SELECT AS VALUE` expression subqueries with a `WITH` clause, including all fields of a STRUCT. One field was dropped while the result was reported as complete (#288)
-- Trace a named STRUCT field reference, such as `s.x` in an expression, to the field it selects when its binding and shape are known, instead of to every field of the STRUCT (#289)
-- Report the diagnostics of `dlin column downstream` and the MCP `get_column_lineage` tool with `direction: downstream` in the same order on every run (#294)
-
-## [0.3.0-rc.1] - 2026-11-23
+## [0.3.0] - 2026-11-24
 
 ### Breaking Changes
 
-- `dlin impact` and the MCP `get_impact` tool leave tests out by default and report every other node type. A test is the end of a path in dbt, so an unanalysed test body no longer makes every impact exploration incomplete. Completeness and `proves_no_impact` apply to the reported `node_types`. In JSON, `affected_models`, `affected_tests` and `affected_exposures` are null when their type is not selected, and `overall_severity` is null when no selected node was reached. Use `--node-type model,test` to include tests (#284)
-- Rust API: `compute_impact` takes an `ImpactScope`, which holds at least one node type (#284)
+#### Model-level lineage
 
-### Features
-
-- Select the node types an impact report covers with `dlin impact --node-type` or the MCP `get_impact` argument `node_types`. The search still walks the whole graph, so paths and distances pass through nodes of any type (#284)
-- Expand the fields of an aggregated row or STRUCT taken by a single subscript, such as `array_agg(t order by ts desc limit 1)[offset(0)]` in BigQuery, so `item.*` traces each field to its source column. A range variable used alone is a row value with the columns of its relation, and a BigQuery value table made with `SELECT AS STRUCT` or `SELECT AS VALUE STRUCT(...)` publishes its fields. Supported in BigQuery, DuckDB, PostgreSQL, Spark and Databricks (#286)
-
-### Bug Fixes
-
-- Expand stars over STRUCT columns (`item.*`) in BigQuery, Databricks, Spark and DuckDB instead of reading them as relations, so a column listed next to such a star is no longer reported as ambiguous. Fields built with a STRUCT constructor are traced to the values they were built from (#283)
-- A column that may overlap a star whose fields are not known is reported as partial with a nonfatal `unverified` reason, and column commands exit with 0. A name that two providers are known to publish, including through repeated star projections and USING keys exposed by qualified stars, is still ambiguous and fatal (#285)
-
-## [0.3.0-beta.1] - 2026-11-22
-
-### Breaking Changes
-
-- SQL mode no longer prints `unresolved ref '...'` or `unresolved source '...'` warnings when a reference names a missing target. Every referencing node carries an `unresolved_ref` or `unresolved_source` reason instead, and the stderr summary counts them. Use `--verbose` to see each one with its node and call site (#281)
-- Commands that build the lineage graph print a `dependency_analysis_summary` on stderr when the dependency analysis is incomplete, and a configuration warning when a path set in `dbt_project.yml` does not exist. In manifest mode the summary is printed at the `info` level, since manifest dependencies are not assessed. `--quiet` suppresses both (#281)
-- Rust API: `compute_impact` takes a `GraphBuild`, which holds the graph together with its project gaps, and returns `Option<ImpactReport>`. Build one with `build_graph_report` or `GraphBuild::from_manifest`. `ImpactReport` exposes `impacted_nodes`, `source_node` and `exploration` through accessors (#281)
-
-### Features
-
-- Impact reports say whether they can miss downstream nodes. JSON reports include `source_node`, the `dependency_analysis` of each impacted node, and an `exploration` that is `complete` or `incomplete` with typed gaps: nodes outside the result whose dependencies are not fully analysed, skipped inputs, and unassessed scopes such as manifest dependencies. Text output shows an `Exploration:` line. The MCP `get_impact` result includes the same information. The README describes how to check “no impact” in CI (#281)
-- `list` JSON includes each node's `dependency_analysis` by default, and `graph` JSON includes it with `--json-full` or `--json-fields dependency_analysis` (#281)
-- New global `--verbose` flag prints one diagnostic per dependency analysis reason and skipped input. With `--error-format json`, these diagnostics carry a `code` and typed fields (#281)
-
-### Bug Fixes
-
-- Report YAML generic tests as partially analysed: the body of the test macro is not analysed, so a `ref()` written only inside it has no edge. An impact report for a model read only inside such a test no longer claims “no impact” (#278, #281)
-- Apply in-place changes, such as `update()`, `pop()` and `append()`, to dicts and lists produced by `dict()`, `var()`, filters and methods, so the changed value selects the dependency. Changes that are not modelled make the value unknown instead of keeping its old value (#280)
-- Column lineage no longer reports window functions that use a named or inherited window (`OVER w`) without the window's `PARTITION BY` and `ORDER BY` columns. Wildcard function arguments such as `OBJECT_CONSTRUCT(*)` make lineage partial instead of complete with no inputs (#277)
-
-## [0.3.0-alpha.2] - 2026-11-19
-
-### Breaking Changes
-
-- MCP tools return one compact JSON text result in `content` and no longer return `structuredContent`. Impact tools default to summaries, and `find_nodes` includes compiled SQL only when requested with `include_sql: true` (#274)
-- Column commands return partial lineage and exit with status 0 when an unknown schema prevents them from verifying a column's provider, provided there are no other fatal diagnostics. Confirmed ambiguities remain fatal. Column lineage JSON exposes the `unverified` reason and candidate providers (#272, #273)
-
-### Features
-
-- Use CSV headers as column schema evidence for seeds with no columns declared in the manifest, including installed package seeds. Changing or removing a header invalidates cached lineage that used it (#273, #274)
-- Paginate MCP node searches, lineage graphs and impact results. Request `detail: "full"` for impact paths and detailed evidence. The project summary reports manifest freshness, grouped load warnings and the number of skipped unit tests (#274)
-
-### Bug Fixes
-
-- Keep the schema of sources declared without one in column lineage output, defaulting it to the source name as dbt does, so a column from `raw.orders` is no longer shown as `orders` in plain, Mermaid and DOT output or in JSON `known[].table` (#276)
-- Stop attributing a table to a source whose physical relation has another name. Compiled SQL names a source by its physical relation, so a reference to the source's logical name, such as `raw.orders` for a source stored as `landing.orders_v2`, now reads that table rather than the source (#276)
-- Resolve BigQuery `INFORMATION_SCHEMA` references with their project and dataset or region intact. Match these references to declared sources and preserve their namespace in column lineage JSON (#272)
-- Trace fields exposed by unaliased BigQuery `UNNEST` to their array inputs. When the element schema is unknown, report possible providers and downstream impact instead of guessing a source (#272)
-- Stop treating normalization modes such as `NFKC` as column references in BigQuery `NORMALIZE` and `NORMALIZE_AND_CASEFOLD`, and in PostgreSQL and Trino `normalize` (#272)
-- Check manifest paths against their owning project or installed package, including package macros and configuration. Check dependency declarations and the lockfile for updates. Report missing packages as unverified and missing files inside installed packages as stale (#274)
-- Skip valid dbt unit tests without warnings, including in strict manifest mode. Strict mode rejects entries with a missing or mismatched resource type or ID (#274)
-
-## [0.3.0-alpha.1] - 2026-11-19
-
-### Highlights
-
-- **Model-level lineage (SQL mode).** A new Jinja interpreter replaces placeholder rendering and regex recovery. It evaluates project variables, macro calls, conditions and loops to extract dependencies from SQL and supported YAML expressions (#262, #263, #264)
-- **Column-level lineage (Experimental).** The redesigned SQL analysis engine tracks ordered, quoted output slots, preserves known sources in partial results, and reports trace boundaries, possible impacts and schema evidence (#215, #244, #245, #246, #250)
-
-### Breaking Changes
-
-#### Model-level lineage (SQL mode)
-
-- With `execute` set to false, the interpreter skips `if execute` bodies and standard `statement` blocks. Refs in branches ruled out by project variables or in unused macros no longer produce edges. Names that depend on unknown runtime values no longer produce guessed edges or placeholder warnings. Literal refs under unknown conditions still produce edges. Unresolved literal refs and sources still emit warnings (#262, #263)
-- `env_var()` uses its default without reading environment variables. Calls without a default and calls for `DBT_ENV_SECRET*` remain unknown. Both `var()` and `env_var()` accept `default=` (#262, #263)
-- Repeated refs to the same model produce a single edge. SQL mode no longer reads or writes `.dlin_cache/extraction_cache.json`. The `--cache-dir`, `--no-cache` and `--refresh-cache` flags have no effect in SQL mode and still control manifest and column lineage caching (#263)
+- SQL mode now interprets Jinja to find dependencies. It sets `execute` to false, skips `statement` blocks, follows branches selected by known values, and keeps literal dependencies from branches whose conditions are unknown. Dependency names that require runtime values stay unresolved, and repeated references produce one edge (#262, #263)
+- In SQL mode, `env_var()` defaults can now select branches. Calls without a default and calls for `DBT_ENV_SECRET*` stay unknown. The environment is still ignored (#262, #263)
+- Missing `ref()` and `source()` targets are now reported as `unresolved_ref` and `unresolved_source` reasons on the referencing node. Graph-building commands print a `dependency_analysis_summary` on stderr when there are unresolved reasons or project gaps. Use `--verbose` for individual diagnostics, `--error-format json` for typed fields, or `--quiet` to suppress them (#281)
+- SQL mode no longer uses `.dlin_cache/extraction_cache.json`. Cache flags still apply to manifest mode and column lineage (#263)
+- Short names prefer a model when other node types share its name. Remaining ambiguities fail with a list of candidate IDs, including `ambiguous_node_name` errors in MCP. Select a node by its exact unique ID or, for SQL files, by its path (#300)
+- Impact reports exclude tests by default. Select the reported types with `--node-type` or MCP `node_types`, for example `--node-type model,test` to include tests. Paths can still pass through any node type. JSON counts for excluded types and severity when no selected node is reached are now null (#284)
 
 #### Column-level lineage
 
-- Column lineage JSON changes without a compatibility layer, including MCP results. Upstream uses `output.columns[]` and replaces `traced_columns` and `total_columns` with `listed_columns`, `value_complete_columns` and `value_partial_columns`. Downstream reports `confirmed`, `possible` and `exploration`. See both column subcommands' `--help` for the schemas (#244, #245, #246, #249, #250)
-- Output columns follow compiled SQL order, preserve duplicates and quoting, and use dialect-specific name matching. Columns declared only in YAML are omitted from the output and produce a non-fatal diagnostic. Ambiguous upstream column selections and ambiguous short model names are reported without choosing a match. Downstream searches still look for references by name when the input slot cannot be identified (#222, #225, #245, #246)
-- The right operand of `EXCEPT` contributes no column values. Constants and failed models no longer appear as sources, and references through unmodelled FROM items stay unresolved (#243, #246, #255)
-- Some failures previously reported as `parse_failure` now use `unsupported_syntax` or `unsupported_statement`. Unequal-width `VALUES` rows now fail analysis with `VALUES_ROW_ARITY_MISMATCH` (#251, #255)
+- Column lineage JSON, including MCP results, has a new schema. Upstream lists output slots in `output.columns[]` and replaces `traced_columns` and `total_columns` with `listed_columns`, `value_complete_columns`, and `value_partial_columns`. Downstream reports `confirmed`, `possible`, and `exploration`. Both subcommands document the schemas in `--help` (#244, #245, #246, #249, #250, #297)
+- List output columns in compiled SQL order, preserving duplicates and quoting. Match names using the SQL dialect's rules, report ambiguous upstream selections, and omit YAML-only columns with a diagnostic (#222, #225, #245, #246)
+- Use `unsupported_syntax` or `unsupported_statement` for some diagnostics previously reported as `parse_failure`. Reject unequal-width `VALUES` rows with `VALUES_ROW_ARITY_MISMATCH` (#251, #255)
+
+#### MCP
+
+- Read tool results from the single compact JSON text entry in `content`. The `structuredContent` field has been removed. Impact and column lineage default to summaries, with `detail: "full"` available for paths and evidence. Request compiled SQL from `find_nodes` with `include_sql: true` (#274)
 
 #### Rust API
 
-- The bundled `dlin-sqllineage` crate replaces the `sqllineage` git dependency and exposes a structured analysis API. The `dlin-core` column lineage and impact result types follow the new output model (#211, #215, #244, #245, #246)
-- `build_graph` and `build_graph_report` take `(project_dir, project_name, files, vars)`. The old SQL extraction functions are removed, and `ManifestNode::relation_name()` is now `identifier()` (#257, #263, #264)
+- Replace the `sqllineage` Git dependency with the bundled `dlin-sqllineage` crate and its structured analysis API. The `dlin-core` column-lineage and column-impact result types follow the new output model (#211, #215, #244, #245, #246)
+- Pass `(project_dir, project_name, files, vars)` to `build_graph` and `build_graph_report`. For dispatch resolution, use `build_graph_report_with_macro_resolution` with `DbtProject::macro_resolution()`. The legacy SQL extraction functions are removed, and `ManifestNode::relation_name()` is now `identifier()` (#257, #263, #264, #302)
+- Use `compute_impact(&build, source_idx, &scope)` with a `GraphBuild` and `ImpactScope`. It returns `Option<ImpactReport>`. Use accessors for `impacted_nodes`, `source_node`, and `exploration`. Exploration types are in `graph::exploration` (#281, #284, #300)
+- Update struct literals for `NodeData::dependency_analysis`, `DbtProject::dispatch`, and `DiscoveredFiles::macro_inventory_incomplete` (#258, #264, #302)
 
 ### Features
 
-- Interpret dependency expressions in generic test arguments, exposure `depends_on` entries including `source()`, and YAML snapshot `relation` values (#264)
-- Partial lineage retains known sources. Trace boundaries distinguish external relations and source-free outputs from incomplete stops such as failed analysis, missing definitions or cycles. Downstream reports possible impacts from finite candidate sets. Confirmed and possible paths to the same output can both be reported. It concludes “no impact” only when both impact lists are empty and exploration is complete (#244, #246)
-- Results cite the SQL output, catalog or YAML evidence each conclusion relies on. Plain, Mermaid and DOT output flag conclusions that rely on a YAML column list assumed exhaustive or on a declared enforced contract (#248, #249, #250)
-- Improve value tracing through supported scalar and ARRAY subqueries, `IN` and `UNNEST`, and resolve positional column aliases and aliased joins where the dialect and output shape permit. Support `TABLE` when the relation can be identified, and strict `BY NAME` forms in BigQuery and `UNION BY NAME` in DuckDB and Snowflake when both sides have the same known, unique names (#226, #252, #254, #255, #256)
-- `dlin-core` exposes per-node dependency analysis through `NodeData::dependency_analysis`. Manifest nodes are marked `not_assessed`. The CLI does not expose this analysis yet (#258, #264)
+#### Model-level lineage
+
+- Report typed `dependency_analysis` reasons per node in `list` and `impact` JSON, and in `graph` JSON with `--json-full` or `--json-fields dependency_analysis`. Impact reports identify the source node and include exploration gaps that could hide downstream nodes, including skipped inputs and unassessed scopes. The README documents how to check for no impact in CI (#258, #264, #281)
+- Report upstream exploration gaps in focused SQL-mode graph queries, including reached nodes with unresolved dependencies within the requested depth and skipped project inputs. Output filters preserve these diagnostics. The MCP `get_lineage` tool also reports them (#300)
+- Evaluate Jinja dependencies in generic test arguments, exposure `depends_on` entries, and YAML snapshot `relation` values (#264)
+- Render Jinja strings returned by `var()` at call time, as [dbt Fusion](https://github.com/dbt-labs/dbt-fusion) does. Variables scoped to the root project take precedence over global variables (#301)
+- Resolve macros called through the root project's namespace. Resolve explicit `adapter.dispatch()` calls into that namespace when a default implementation is available, no adapter-specific implementation competes, and no dispatch override applies (#302)
+
+#### Column-level lineage
+
+- Remove the experimental label. Preserve known sources for partial columns, report where tracing stopped, and distinguish confirmed downstream impacts from possible ones (#215, #244, #246, #290)
+- Cite schema evidence from compiled SQL, catalogs, seed headers, or YAML. Plain, Mermaid, and DOT output flag conclusions that rely on an exhaustive YAML column list or an enforced contract (#248, #249, #250)
+- Infer undeclared seed columns from CSV headers, including installed package seeds, and invalidate cached lineage when a header it relies on changes or disappears (#273, #274)
+- Trace values through scalar and ARRAY subqueries, `IN`, `UNNEST`, positional column aliases, aliased joins, and `TABLE` queries. Support strict BigQuery `BY NAME` and DuckDB and Snowflake `UNION BY NAME` when both sides have the same known, unique column names (#226, #252, #254, #255, #256)
+- Trace individual STRUCT fields and expand STRUCT stars, including rows or STRUCTs selected by a single array subscript. Support BigQuery `SELECT AS STRUCT` and `SELECT AS VALUE` value tables (#283, #286, #288, #289)
+
+#### MCP
+
+- Paginate node searches, lineage graphs, impact results, and column lineage. Report manifest freshness, grouped load warnings, and skipped unit test counts in the project summary (#274)
 
 ### Bug Fixes
 
-- Exposures report their defining YAML path in SQL mode and `original_file_path` in manifest mode. Generic test definitions under `tests/generic/` are loaded as macros, and macro files can contain `{% test %}` blocks. Definition files no longer appear as singular test nodes (#264, #265, #266)
-- Match upstream manifest relations using the adapter's rendered `relation_name` when available and usable, including ClickHouse two-part names (#257)
-- Fix name resolution for joins, `LATERAL` scopes, unaliased derived tables and star modifiers. A `LATERAL` scoping fix prevents a stack overflow. Unsupported expressions such as lambdas now leave lineage partial, and relation reads include subqueries in more clauses (#227, #231, #233, #238, #251, #253, #256)
+- Report the defining file path for exposures and load generic test definitions under `tests/generic/` as macros, so they no longer appear as singular tests (#264, #265, #266)
+- Match upstream manifest relations by the adapter's rendered `relation_name` when usable, including ClickHouse two-part names (#257)
+- Check manifest freshness against installed package paths and track dependency declarations and the lockfile. Report missing packages as unverified and missing files within installed packages as stale. Skip valid dbt unit tests without warnings, including in strict mode (#274)
+- Keep column lineage partial when unknown schemas prevent verification of a column's provider. These cases report an `unverified` reason and candidate providers and exit successfully in the absence of fatal errors. Confirmed ambiguities still fail (#272, #273, #285)
+- Correct column resolution for joins, `LATERAL` scopes, unaliased derived tables, star modifiers, and explicit target column lists. Prevent a stack overflow in `LATERAL` queries (#227, #231, #232, #233, #238, #253, #256)
+- Trace `EXCEPT` values from the left operand and include the partition and ordering columns of named or inherited windows. Stop attributing values to failed analyses or constants, and keep unresolved references partial for opaque FROM items and unsupported expressions or wildcard arguments (#243, #246, #251, #255, #277)
+- Preserve source schema prefixes and match manifest sources by their physical relation names (#276)
+- Resolve BigQuery `INFORMATION_SCHEMA` references with their full namespace, trace fields from unaliased `UNNEST` inputs, and recognize normalization modes such as `NFKC` in BigQuery, PostgreSQL, and Trino (#272)
+- Report downstream column-lineage diagnostics in a stable order (#294)
 
 ### Performance
 
-- SQL mode parses macro files once per run, avoiding recompilation for each model. In the interpreter benchmark on six real projects, median elapsed time for `summary --source sql --no-cache -o json --quiet` was 0.17–0.95× the v0.2.6 baseline (#262, #263)
+- Across 11 public dbt projects ([Tuva](https://github.com/tuva-health/tuva), [jaffle-shop](https://github.com/dbt-labs/jaffle-shop), [cal-itp data-infra](https://github.com/cal-itp/data-infra) and the Fivetran packages [dbt_hubspot](https://github.com/fivetran/dbt_hubspot), [dbt_jira](https://github.com/fivetran/dbt_jira), [dbt_netsuite](https://github.com/fivetran/dbt_netsuite), [dbt_quickbooks](https://github.com/fivetran/dbt_quickbooks), [dbt_salesforce](https://github.com/fivetran/dbt_salesforce), [dbt_shopify](https://github.com/fivetran/dbt_shopify), [dbt_stripe](https://github.com/fivetran/dbt_stripe), [dbt_zendesk](https://github.com/fivetran/dbt_zendesk)), `dlin list --source sql --no-cache -o json -q` took about 15–86% of the time of 0.2.6 in release builds. For example, dbt_shopify went from 557 ms to 81 ms and Tuva from 1,092 ms to 678 ms (#262, #263, #299, #304)
+- Reduce the cost of tracing wide models. A single-column upstream query across eight chained models of 200 columns takes about 50 ms without a cache and 23 ms with a warm cache (#292, #293)
 
 ### Known Limitations
 
-- Plain, Mermaid and DOT output and JSON `known[].table` can omit the source prefix. For example, a column from `raw.orders` can appear as `orders.id` in a path and be hard to distinguish from the `orders` model. The boundary shows `raw.orders` in full. A fix is planned for the next release
+- In SQL mode, macro calls into installed packages, such as `fivetran_utils.union_connections()` from [dbt_fivetran_utils](https://github.com/fivetran/dbt_fivetran_utils), and `adapter.dispatch()` calls into namespaces outside the root project can leave dependencies missing. Affected nodes are marked partial with `unsupported_macro_namespace` or `unsupported_dispatch`
 
 ## [0.2.6] - 2026-10-25
 
