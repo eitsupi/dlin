@@ -54,6 +54,9 @@ pub struct DbtProject {
     pub vars: HashMap<String, serde_json::Value>,
 
     #[serde(default)]
+    dispatch: serde_json::Value,
+
+    #[serde(default)]
     pub flags: ProjectFlags,
 }
 
@@ -260,6 +263,7 @@ impl DbtProject {
             macro_paths: resolve(&self.macro_paths),
             analysis_paths: resolve(&self.analysis_paths),
             allow_jinja_file_extensions: self.flags.allow_jinja_file_extensions,
+            dispatch_overrides: DispatchOverrides::from_project(&self.dispatch),
             origins: PathOrigins {
                 model_paths: self.model_paths.origin(),
                 seed_paths: self.seed_paths.origin(),
@@ -451,6 +455,53 @@ pub struct ResolvedPaths {
     pub allow_jinja_file_extensions: bool,
     /// Whether each setting was written in `dbt_project.yml`.
     pub origins: PathOrigins,
+    pub(crate) dispatch_overrides: DispatchOverrides,
+}
+
+/// Namespaces for which the root's default dispatch order cannot be assumed.
+#[derive(Debug, Clone, Default)]
+pub enum DispatchOverrides {
+    #[default]
+    None,
+    Namespaces(Vec<String>),
+    Unknown,
+}
+
+impl DispatchOverrides {
+    fn from_project(value: &serde_json::Value) -> Self {
+        if value.is_null() {
+            return Self::None;
+        }
+        let Some(entries) = value.as_array() else {
+            return Self::Unknown;
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let Some(name) = entry
+                .get("macro_namespace")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return Self::Unknown;
+            };
+            // A templated namespace could resolve to any name.
+            if ["{{", "{%", "{#"]
+                .iter()
+                .any(|marker| name.contains(marker))
+            {
+                return Self::Unknown;
+            }
+            names.push(name.to_owned());
+        }
+        Self::Namespaces(names)
+    }
+
+    pub(crate) fn affects(&self, namespace: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Namespaces(names) => names.iter().any(|name| name == namespace),
+            Self::Unknown => true,
+        }
+    }
 }
 
 /// The origin of each `*-paths` setting.
@@ -519,6 +570,7 @@ impl ResolvedPaths {
             analysis_paths: resolve(&["analyses"]),
             allow_jinja_file_extensions: false,
             origins: PathOrigins::default(),
+            dispatch_overrides: DispatchOverrides::default(),
         }
     }
 }

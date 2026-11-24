@@ -57,9 +57,9 @@ Data sources:
                   dependency or branch. Values known only at run time (target,
                   env_var() without a default, run_query() results) do not select
                   dependencies; execute is false, as in dbt parsing.
-                  Dependencies selected through adapter.dispatch() or namespaced
-                  package macros (e.g. dbt_utils.*) may be missed; the nodes
-                  concerned are reported as partial (see dependency_analysis).
+                  Resolves root project macro calls and adapter-independent dispatch
+                  into that namespace. Other dispatch calls and external package
+                  macros may leave dependencies partial (see dependency_analysis).
                   Generic tests (not_null, unique, etc.) are inferred from YAML declarations
                   with dlin-specific IDs — use manifest mode for exact dependency resolution.
   manifest        Read a pre-compiled manifest.json, the dependency graph recorded by

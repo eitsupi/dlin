@@ -41,6 +41,10 @@ impl<'a> Interp<'a> {
                 if let ExprKind::Var(namespace) = &expr.kind
                     && !self.is_bound(st, namespace)
                 {
+                    if let Some(callee) = self.library.root_macro(namespace, name) {
+                        let (args, kwargs) = self.eval_args(st, &call.args, span)?;
+                        return self.call_value(st, callee, args, kwargs, caller, call);
+                    }
                     let causes = Causes::one(DependencyReason::UnsupportedMacroNamespace {
                         namespace: namespace.to_string(),
                         macro_name: name.to_string(),

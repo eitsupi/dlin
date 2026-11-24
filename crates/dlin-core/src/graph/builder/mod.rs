@@ -1147,7 +1147,12 @@ pub fn build_graph_report(
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<GraphBuild> {
     let mut skipped = files.skipped_inputs.clone();
-    let library = load_macro_library(files, &mut skipped);
+    let skipped_before_macros = skipped.len();
+    let library = load_macro_library(files, &mut skipped).with_root(
+        project_name,
+        files.dispatch_overrides.clone(),
+        files.macro_inventory_incomplete || skipped.len() != skipped_before_macros,
+    );
     // SQL mode analyses the root project. Its own package-scoped vars
     // override the global entries for all nodes analysed in this scope.
     let scoped_vars = vars

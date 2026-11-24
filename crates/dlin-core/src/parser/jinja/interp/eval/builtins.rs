@@ -390,10 +390,25 @@ impl<'a> Interp<'a> {
             Builtin::Dispatch => {
                 let name = args
                     .first()
+                    .or_else(|| kwarg("macro_name"))
                     .and_then(|value| self.string_arg(st, value, span).ok().flatten());
                 let namespace = kwarg("macro_namespace")
                     .or_else(|| args.get(1))
                     .and_then(|value| self.string_arg(st, value, span).ok().flatten());
+                // Only an explicitly named root namespace closes the search.
+                // Reject duplicate, unknown, or excess arguments before selecting it.
+                if let (Some(name), Some(namespace)) = (&name, &namespace)
+                    && args.len() <= 2
+                    && args.len() + kwargs.len() == 2
+                    && kwargs
+                        .iter()
+                        .all(|(key, _)| matches!(key.as_ref(), "macro_name" | "macro_namespace"))
+                    && (args.is_empty() || kwarg("macro_name").is_none())
+                    && (args.len() < 2 || kwarg("macro_namespace").is_none())
+                    && let Some(callee) = self.library.dispatch(name, namespace)
+                {
+                    return Ok(callee);
+                }
                 let causes = Causes::one(DependencyReason::UnsupportedDispatch {
                     name,
                     namespace,
