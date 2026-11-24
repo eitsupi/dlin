@@ -53,8 +53,9 @@ pub struct DbtProject {
     #[serde(default)]
     pub vars: HashMap<String, serde_json::Value>,
 
+    /// The raw `dispatch` setting from `dbt_project.yml`.
     #[serde(default)]
-    dispatch: serde_json::Value,
+    pub dispatch: serde_json::Value,
 
     #[serde(default)]
     pub flags: ProjectFlags,
@@ -455,15 +456,19 @@ pub struct ResolvedPaths {
     pub allow_jinja_file_extensions: bool,
     /// Whether each setting was written in `dbt_project.yml`.
     pub origins: PathOrigins,
-    pub(crate) dispatch_overrides: DispatchOverrides,
+    /// Project dispatch settings that can change the default macro search order.
+    pub dispatch_overrides: DispatchOverrides,
 }
 
 /// Namespaces for which the root's default dispatch order cannot be assumed.
 #[derive(Debug, Clone, Default)]
 pub enum DispatchOverrides {
+    /// No project dispatch overrides were configured.
     #[default]
     None,
+    /// The namespaces with configured overrides, including empty search orders.
     Namespaces(Vec<String>),
+    /// The affected namespaces could not be determined from the configuration.
     Unknown,
 }
 

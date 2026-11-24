@@ -17,9 +17,9 @@ pub struct DiscoveredFiles {
     pub test_sql_files: Vec<PathBuf>,
     pub yaml_files: Vec<PathBuf>,
     pub macro_sql_files: Vec<PathBuf>,
-    #[doc(hidden)]
+    /// Whether discovery could not fully inspect the root's macro search paths.
     pub macro_inventory_incomplete: bool,
-    #[doc(hidden)]
+    /// Project dispatch settings that can change the default macro search order.
     pub dispatch_overrides: DispatchOverrides,
     /// Inputs that could not be inspected or listed. Discovery carried on
     /// without them. Sorted and deduplicated.
