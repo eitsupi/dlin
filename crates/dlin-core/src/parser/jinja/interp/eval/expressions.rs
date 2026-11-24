@@ -921,7 +921,9 @@ fn string_membership(st: &State, needle: &AValue, container: &AValue) -> Option<
     match st.heap.get(id)? {
         HeapObj::List(items) => items.iter().try_fold(false, |found, item| match item {
             AValue::Known(value) => Some(found || value == needle),
-            _ => None,
+            // A nested container cannot equal a string, but freezing it
+            // can still fail and make the whole comparison unknown.
+            _ => can_freeze(st, item, 1).then_some(found),
         }),
         HeapObj::Map(entries) => entries.iter().try_fold(false, |found, (key, value)| {
             if key.kind() != ValueKind::String || !can_freeze(st, value, 1) {
