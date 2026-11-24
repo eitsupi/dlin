@@ -214,21 +214,30 @@ impl<'a> Interp<'a> {
                     Ok(None) => return Ok(AValue::undefined()),
                     Err(causes) => return Ok(AValue::Unknown(causes)),
                 };
-                if let Some(value) = self.vars.get(&name) {
-                    // Each call gives a new copy of the configured value, as
-                    // in dbt; a default is returned as it is.
+                let configured = self.vars.get(&name);
+                let value = if let Some(value) = configured {
+                    // Each call gets a new copy of the configured value.
                     let value = Value::from(minijinja::value::Serde(value));
-                    return Ok(self.adopt_result(st, value, span));
+                    self.adopt_result(st, value, span)
+                } else if let Some(default) = args.get(1).or_else(|| kwarg("default")) {
+                    default.clone()
+                } else {
+                    return Ok(AValue::Unknown(Causes::one(
+                        DependencyReason::UnresolvedVar {
+                            name: Some(name),
+                            at: self.site(span),
+                        },
+                    )));
+                };
+                if let AValue::Known(value) = &value
+                    && let Some(text) = value.as_str()
+                    && ["{{", "{%", "{#"]
+                        .iter()
+                        .any(|marker| text.contains(marker))
+                {
+                    return self.render_var_template(st, name, text, configured.is_some(), span);
                 }
-                if let Some(default) = args.get(1).or_else(|| kwarg("default")) {
-                    return Ok(default.clone());
-                }
-                Ok(AValue::Unknown(Causes::one(
-                    DependencyReason::UnresolvedVar {
-                        name: Some(name),
-                        at: self.site(span),
-                    },
-                )))
+                Ok(value)
             }
             Builtin::EnvVar => {
                 // The environment is never read, so the result does not depend

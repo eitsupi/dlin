@@ -1144,3 +1144,140 @@ fn views_concatenations_and_dict_order() {
     assert_eq!(ref_names(&e), vec!["z"]);
     assert!(e.reasons.is_empty(), "{:?}", e.reasons);
 }
+
+#[test]
+fn var_templates_use_an_isolated_frame_and_keep_conditional_calls() {
+    let e = extract_with(
+        r#"{% set shadowed = true %}
+{% for loop_value in [true] %}{{ wrapper(true) }}{% endfor %}
+{% if target.name == 'prod' %}{% set ignored = var('conditional') %}{% endif %}"#,
+        &[
+            r#"{% macro wrapper(arg) %}{{ var('scoped') }}{% endmacro %}"#,
+            r#"{% macro base_macro() %}{{ ref('base_macro') }}{% endmacro %}"#,
+        ],
+        &[
+            (
+                "scoped",
+                serde_json::json!(
+                    r#"{% if shadowed is defined or loop_value is defined or arg is defined or execute %}
+{{ ref('leaked') }}{% else %}{{ base_macro() }}{% endif %}"#
+                ),
+            ),
+            (
+                "conditional",
+                serde_json::json!(r#"{{ ref('conditional') }}"#),
+            ),
+        ],
+    );
+    assert_eq!(ref_names(&e), ["base_macro", "conditional"]);
+    assert_eq!(codes(&e), ["runtime_value_unknown"]);
+    assert!(e.decisions.iter().any(|d| {
+        d.reference
+            .as_ref()
+            .is_some_and(|r| r.name == "conditional")
+            && d.outcome == DecisionOutcome::Accepted { conditional: true }
+    }));
+    assert_eq!(e.ref_sites[0].line, Some(2));
+    assert_eq!(
+        e.ref_sites[0].var_template.as_ref().unwrap().names,
+        ["scoped"]
+    );
+}
+
+#[test]
+fn var_template_output_is_a_string_and_is_rendered_once() {
+    let e = extract_with(
+        r#"{{ ref(var('name')) }}
+{{ var('list')[0] }}{{ var('map').value }}{{ var('raw') }}
+{{ env_var('ENV', "{{ ref('env') }}") }}
+{{ var('unset', default="{# remove this #}{{ ref('keyword_default') }}") }}"#,
+        &[],
+        &[
+            ("name", serde_json::json!(r#"{{ 'model' | upper }}"#)),
+            ("list", serde_json::json!([r#"{{ ref('list') }}"#])),
+            ("map", serde_json::json!({"value": r#"{{ ref('map') }}"#})),
+            (
+                "raw",
+                serde_json::json!(r#"{% raw %}{{ ref('raw') }}{% endraw %}"#),
+            ),
+        ],
+    );
+    assert_eq!(ref_names(&e), ["MODEL", "keyword_default"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn var_template_parse_and_work_limits_preserve_confirmed_edges() {
+    let large = format!(r#"{{# {} #}}"#, "x".repeat(16 * 1024));
+    let many_tokens = format!(r#"{{{{ {}'z' }}}}"#, "'z' ~ ".repeat(128));
+    let output_budget = format!(
+        r#"{{% do ref('inside') %}}{{% for i in range(1000) %}}{}{{% endfor %}}"#,
+        "x".repeat(1500)
+    );
+    for (value, expected_refs, expected_limit) in [
+        (
+            large,
+            &["outside"][..],
+            AnalysisLimit::VarTemplateParseBudget,
+        ),
+        (
+            many_tokens,
+            &["outside"][..],
+            AnalysisLimit::VarTemplateParseBudget,
+        ),
+        (
+            output_budget,
+            &["inside", "outside"][..],
+            AnalysisLimit::WorkBudget,
+        ),
+    ] {
+        let e = extract_with(
+            r#"{{ ref('outside') }}{% set ignored = var('limited') %}"#,
+            &[],
+            &[("limited", serde_json::json!(value))],
+        );
+        assert_eq!(ref_names(&e), expected_refs);
+        assert!(
+            matches!(&e.reasons[..],
+            [DependencyReason::AnalysisLimitReached { limit, at }]
+                if *limit == expected_limit && at.line == Some(1)
+                    && at.var_template.as_ref().unwrap().names == ["limited"]),
+            "expected {expected_limit:?}, got {:?}",
+            e.reasons
+        );
+    }
+}
+
+#[test]
+fn var_template_chains_share_the_recursion_limit() {
+    let vars = (0..40)
+        .map(|i| {
+            (
+                i.to_string(),
+                serde_json::json!(format!(r#"{{{{ var('{}') }}}}"#, i + 1)),
+            )
+        })
+        .collect();
+    let e = extract_dependencies(r#"{{ var('0') }}"#, &library(&[]), &vars);
+    assert!(matches!(
+        &e.reasons[..],
+        [DependencyReason::AnalysisLimitReached {
+            limit: AnalysisLimit::RecursionDepth,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn complex_var_template_chains_share_the_parser_token_limit() {
+    let vars = (0..34)
+        .map(|i| {
+            let value = format!(r#"{{{{ var('{}'){} }}}}"#, i + 1, " ~ 'x'".repeat(110));
+            (i.to_string(), serde_json::json!(value))
+        })
+        .collect();
+    let e = extract_dependencies(r#"{{ var('0') }}"#, &library(&[]), &vars);
+    assert!(matches!(&e.reasons[..],
+        [DependencyReason::AnalysisLimitReached { limit: AnalysisLimit::VarTemplateParseBudget, at }]
+            if at.var_template.as_ref().unwrap().names == ["0", "1"]));
+}

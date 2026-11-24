@@ -15,6 +15,8 @@ use minijinja::Value;
 pub(crate) enum SourceId {
     /// The SQL file being analysed (a model, snapshot, test or analysis).
     Template,
+    /// A string selected by a var() call.
+    VarTemplate,
     /// A project macro file, by index in the library.
     MacroFile(u32),
 }

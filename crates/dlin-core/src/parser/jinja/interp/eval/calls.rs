@@ -249,7 +249,7 @@ impl<'a> Interp<'a> {
             st.clobber_reachable(args.iter().chain(kwargs.iter().map(|(_, v)| v)), &causes);
             return Ok(AValue::Unknown(causes));
         }
-        let entering = self.depth == 0;
+        let entering = self.root_call.is_none();
         if entering {
             self.root_call = Some(span);
             // The template's variables cannot change until this call

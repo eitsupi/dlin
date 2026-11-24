@@ -89,7 +89,7 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 
 ### Limitations of SQL parse mode
 
-- `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported)
+- `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported). Entries scoped to the root project take precedence over global entries. A selected Jinja string is rendered when called
 - `env_var()` uses its default and never reads the environment. A different value at run time can select a different dependency or branch than the one shown
 - Values known only at run time (`target`, `env_var()` without a default, `run_query()` results) do not select dependencies; `execute` is false, as when dbt parses the project
 - Dependencies selected through `adapter.dispatch()` or namespaced package macros (e.g. `dbt_utils.*`) may be missed. The nodes concerned are reported as partial (see [Completeness of model-level dependencies](#completeness-of-model-level-dependencies))
@@ -498,6 +498,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 | `generic_test_body_not_analyzed` | The body of a generic test macro is not analysed; its YAML arguments are evaluated, and may carry reasons of their own | miss | Whether the test macro reads other models |
 | `unsupported_dependency_expression`, `dependency_target_missing` | An exposure `depends_on` entry that is not supported or names nothing | miss | The entry |
 | `unresolved_var` | A `var()` without a value or default selects a dependency | miss, wrong edge | Set the variable or give a default |
+| `cyclic_var_template` | A variable template reads a configured variable whose template is still rendering | miss, wrong edge | Break the cycle between variable templates |
 | `runtime_value_unknown` | A value known only when dbt runs (`target`, `env_var()` without a default, `run_query()`, ...) selects a dependency | miss, wrong edge | A manifest generated for that environment |
 | `unsupported_dispatch` | `adapter.dispatch()` is not resolved | miss, wrong edge | The dispatched implementations |
 | `unsupported_macro_namespace` | A macro called through a namespace (`dbt_utils.star()`, `dbt.type_string()`) is not analysed | miss, wrong edge | That macro, as described above |
@@ -505,7 +506,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 | `macro_reachability_unknown` | The macros a call can reach could not be determined | miss, wrong edge | Which macro the call selects |
 | `unsupported_jinja_construct` | A Jinja construct the analysis does not model | miss, wrong edge | That part of the template |
 | `jinja_render_failed` | The template could not be interpreted | miss, wrong edge | The template syntax |
-| `analysis_limit_reached` | The analysis stopped at a recursion or work limit | miss, wrong edge | Deeply recursive macros |
+| `analysis_limit_reached` | The analysis stopped at a recursion, parser, or work limit | miss, wrong edge | Check recursive macros and large or deeply nested variable templates |
 | `unsupported_ref_package` | A `ref()` naming a package, resolved by name only | miss, wrong edge | That the edge goes to the intended node |
 | `ambiguous_ref` | A `ref()` matching several nodes (`candidates`); the edge goes to one of them | miss, wrong edge | Rename one of them |
 | `not_assessed` | The node's dependencies are not assessed at all (`scope`: `manifest_dependencies`, `semantic_dependencies`, or `phantom_dependencies` on phantom nodes, which is never a gap) | anything | |

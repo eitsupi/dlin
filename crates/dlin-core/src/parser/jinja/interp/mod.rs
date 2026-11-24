@@ -66,10 +66,12 @@ pub(crate) fn extract_dependencies(
         interp.incremental = incremental;
         interp.record_config = !incremental;
         if let Err(Signal::Budget) = interp.run_template(&template.body) {
-            let at = interp
-                .current
-                .map(|span| interp.site(span))
-                .unwrap_or_default();
+            let at = interp.budget_site.take().unwrap_or_else(|| {
+                interp
+                    .current
+                    .map(|span| interp.site(span))
+                    .unwrap_or_default()
+            });
             interp
                 .rec
                 .reasons
@@ -117,7 +119,10 @@ fn recover(sql: &str, line: Option<u32>) -> DependencyExtraction {
         sources,
         config: recovery::extract_config_regex(sql),
         reasons: vec![DependencyReason::JinjaRenderFailed {
-            at: ExtractionSite { line, expr: None },
+            at: ExtractionSite {
+                line,
+                ..ExtractionSite::default()
+            },
         }],
         decisions: Vec::new(),
     }
