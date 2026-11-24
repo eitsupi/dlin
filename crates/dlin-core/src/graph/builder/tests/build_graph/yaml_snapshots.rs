@@ -565,3 +565,96 @@ sources:
         }
     }
 }
+
+#[test]
+fn root_dispatch_respects_project_dispatch_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir(root.join("models")).unwrap();
+    fs::create_dir(root.join("macros")).unwrap();
+    fs::write(root.join("models/upstream.sql"), r#"select 1"#).unwrap();
+    fs::write(
+        root.join("models/consumer.sql"),
+        r#"{{ root_project.wrapper('upstream') }}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("macros/wrapper.sql"),
+        r#"
+{% macro wrapper(name) %}
+  {{ return(adapter.dispatch('choose', 'root_project')(name)) }}
+{% endmacro %}
+{% macro default__choose(name) %}
+  select * from {{ ref(name) }}
+{% endmacro %}
+"#,
+    )
+    .unwrap();
+    for (config, expected) in [
+        ("", true),
+        (
+            r#"
+dispatch:
+  - macro_namespace: unrelated
+    search_order: [unrelated, root_project]
+"#,
+            true,
+        ),
+        (
+            r#"
+dispatch:
+  - macro_namespace: root_project
+    search_order: []
+"#,
+            false,
+        ),
+        (
+            r#"
+dispatch:
+  - macro_namespace: root_project
+    search_order: [other, root_project]
+"#,
+            false,
+        ),
+        (
+            r#"
+dispatch:
+  - macro_namespace: "{{ var('namespace') }}"
+    search_order: [other]
+"#,
+            false,
+        ),
+    ] {
+        fs::write(
+            root.join("dbt_project.yml"),
+            format!("name: root_project\n{config}"),
+        )
+        .unwrap();
+        let project = crate::parser::project::DbtProject::load(root).unwrap();
+        let files = crate::parser::discovery::discover_files(&project.resolve_paths(root)).unwrap();
+        let graph = super::super::super::build_graph_report_with_macro_resolution(
+            root,
+            &files,
+            &project.vars,
+            &project.macro_resolution(),
+        )
+        .unwrap()
+        .into_graph();
+        assert_eq!(graph.edge_count(), usize::from(expected), "{config}");
+        let consumer = graph
+            .node_weights()
+            .find(|node| node.label == "consumer")
+            .unwrap();
+        let report = serde_json::to_value(&consumer.dependency_analysis).unwrap();
+        if expected {
+            assert_eq!(report["status"], "complete");
+        } else {
+            assert_eq!(report["status"], "partial");
+            assert_eq!(report["unresolved"][0]["type"], "unsupported_dispatch");
+            assert_eq!(
+                report["unresolved"][0]["at"]["expr"],
+                r#"root_project.wrapper('upstream')"#
+            );
+        }
+    }
+}

@@ -17,6 +17,8 @@ pub struct DiscoveredFiles {
     pub test_sql_files: Vec<PathBuf>,
     pub yaml_files: Vec<PathBuf>,
     pub macro_sql_files: Vec<PathBuf>,
+    /// Whether discovery could not fully inspect the root's macro search paths.
+    pub macro_inventory_incomplete: bool,
     /// Inputs that could not be inspected or listed. Discovery carried on
     /// without them. Sorted and deduplicated.
     pub skipped_inputs: Vec<SkippedInput>,
@@ -77,13 +79,20 @@ pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
 
     for (setting, dirs, origin) in paths.settings() {
         for dir in dirs {
-            let Some(walked) = walk_root(
+            let skipped_before = discovered.skipped_inputs.len();
+            let walked = walk_root(
                 setting,
                 dir,
                 origin,
                 paths.allow_jinja_file_extensions,
                 &mut discovered,
-            ) else {
+            );
+            if matches!(setting, PathSetting::MacroPaths | PathSetting::TestPaths)
+                && discovered.skipped_inputs.len() != skipped_before
+            {
+                discovered.macro_inventory_incomplete = true;
+            }
+            let Some(walked) = walked else {
                 continue;
             };
             match setting {

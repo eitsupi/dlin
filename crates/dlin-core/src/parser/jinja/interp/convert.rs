@@ -317,10 +317,20 @@ impl Converter {
     }
 
     fn call(&self, call: &ast::Spanned<ast::Call<'_>>) -> Call {
+        let callee = self.expr(&call.expr);
+        let mut receiver = &callee;
+        while let ExprKind::GetAttr { expr, .. } | ExprKind::GetItem { expr, .. } = &receiver.kind {
+            receiver = expr;
+        }
+        let mut span = self.span(call.span());
+        if receiver.span.start < span.start {
+            span.start = receiver.span.start;
+            span.line = receiver.span.line;
+        }
         Call {
-            callee: Box::new(self.expr(&call.expr)),
+            callee: Box::new(callee),
             args: self.args(&call.args),
-            span: self.span(call.span()),
+            span,
         }
     }
 
@@ -402,15 +412,31 @@ impl Converter {
                 expr: self.boxed(&test.expr),
                 args: self.args(&test.args),
             },
-            ast::Expr::GetAttr(attr) => ExprKind::GetAttr {
-                expr: self.boxed(&attr.expr),
-                name: Arc::from(attr.name),
-            },
+            ast::Expr::GetAttr(attr) => {
+                let expr = self.boxed(&attr.expr);
+                return Expr {
+                    span: Span {
+                        start: expr.span.start,
+                        line: expr.span.line,
+                        ..span
+                    },
+                    kind: ExprKind::GetAttr {
+                        expr,
+                        name: Arc::from(attr.name),
+                    },
+                };
+            }
             ast::Expr::GetItem(item) => ExprKind::GetItem {
                 expr: self.boxed(&item.expr),
                 subscript: self.boxed(&item.subscript_expr),
             },
-            ast::Expr::Call(call) => ExprKind::Call(self.call(call)),
+            ast::Expr::Call(call) => {
+                let call = self.call(call);
+                return Expr {
+                    span: call.span,
+                    kind: ExprKind::Call(call),
+                };
+            }
             ast::Expr::List(list) => {
                 ExprKind::List(list.items.iter().map(|e| self.expr(e)).collect())
             }

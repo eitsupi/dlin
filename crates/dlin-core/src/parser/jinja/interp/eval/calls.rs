@@ -38,20 +38,15 @@ impl<'a> Interp<'a> {
                 return self.opaque_call(st, call, &causes);
             }
             ExprKind::GetAttr { expr, name } => {
-                if let ExprKind::Var(namespace) = &expr.kind
-                    && !self.is_bound(st, namespace)
-                {
-                    let causes = Causes::one(DependencyReason::UnsupportedMacroNamespace {
-                        namespace: namespace.to_string(),
-                        macro_name: name.to_string(),
-                        at: self.site(span),
-                    });
-                    return self.opaque_call(st, call, &causes);
-                }
-                let receiver = self.eval(st, expr)?;
+                let receiver = self.eval_attribute_receiver(st, expr)?;
                 match &receiver {
-                    AValue::Context(_) | AValue::Builtin(_) => {
-                        let callee = self.get_attr(st, &receiver, name, expr.span);
+                    AValue::Context(_) | AValue::Builtin(_) | AValue::MacroNamespace(_) => {
+                        let at = if matches!(receiver, AValue::MacroNamespace(_)) {
+                            span
+                        } else {
+                            expr.span
+                        };
+                        let callee = self.get_attr(st, &receiver, name, at);
                         let (args, kwargs) = self.eval_args(st, &call.args, span)?;
                         return self.call_value(st, callee, args, kwargs, caller, call);
                     }
@@ -225,9 +220,11 @@ impl<'a> Interp<'a> {
                 }
                 Ok(AValue::Unknown(self.context_causes(&object, span)))
             }
-            AValue::Known(_) | AValue::Heap(_) | AValue::Relation => Ok(AValue::Unknown(
-                self.unsupported("calling a non-callable value", span),
-            )),
+            AValue::Known(_) | AValue::Heap(_) | AValue::Relation | AValue::MacroNamespace(_) => {
+                Ok(AValue::Unknown(
+                    self.unsupported("calling a non-callable value", span),
+                ))
+            }
         }
     }
 

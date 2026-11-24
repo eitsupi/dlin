@@ -92,7 +92,7 @@ For model-name inputs, `manifest.json` is the only file needed in manifest mode.
 - `var()` resolves from `vars.yml` or `dbt_project.yml`, then its default (`--vars` CLI overrides not supported). Entries scoped to the root project take precedence over global entries. A selected Jinja string is rendered when called
 - `env_var()` uses its default and never reads the environment. A different value at run time can select a different dependency or branch than the one shown
 - Values known only at run time (`target`, `env_var()` without a default, `run_query()` results) do not select dependencies; `execute` is false, as when dbt parses the project
-- Dependencies selected through `adapter.dispatch()` or namespaced package macros (e.g. `dbt_utils.*`) may be missed. The nodes concerned are reported as partial (see [Completeness of model-level dependencies](#completeness-of-model-level-dependencies))
+- Calls through the root project namespace are resolved. An explicit `adapter.dispatch()` into that namespace is resolved when the same implementation wins for every adapter and no matching dispatch override applies. Other dispatch calls and external package macros (e.g. `dbt_utils.*`) can leave dependencies unresolved. The nodes concerned are reported as partial (see [Completeness of model-level dependencies](#completeness-of-model-level-dependencies))
 - Generic test IDs are dlin-specific (e.g. `test.not_null.orders.order_id`) and do not match dbt's naming; use manifest mode when exact test IDs matter
 
 When these limitations matter, use `--source manifest`.
@@ -500,7 +500,7 @@ In the table, *miss* means the graph may lack a dependency, and *wrong edge* tha
 | `unresolved_var` | A `var()` without a value or default selects a dependency | miss, wrong edge | Set the variable or give a default |
 | `cyclic_var_template` | A variable template reads a configured variable whose template is still rendering | miss, wrong edge | Break the cycle between variable templates |
 | `runtime_value_unknown` | A value known only when dbt runs (`target`, `env_var()` without a default, `run_query()`, ...) selects a dependency | miss, wrong edge | A manifest generated for that environment |
-| `unsupported_dispatch` | `adapter.dispatch()` is not resolved | miss, wrong edge | The dispatched implementations |
+| `unsupported_dispatch` | The implementation selected by `adapter.dispatch()` could not be determined | miss, wrong edge | The dispatched implementations |
 | `unsupported_macro_namespace` | A macro called through a namespace (`dbt_utils.star()`, `dbt.type_string()`) is not analysed | miss, wrong edge | That macro, as described above |
 | `unresolved_call` | A call whose callee could not be identified | miss, wrong edge | That the macro is defined in a searched path |
 | `macro_reachability_unknown` | The macros a call can reach could not be determined | miss, wrong edge | Which macro the call selects |

@@ -53,6 +53,10 @@ pub struct DbtProject {
     #[serde(default)]
     pub vars: HashMap<String, serde_json::Value>,
 
+    /// The raw `dispatch` setting from `dbt_project.yml`.
+    #[serde(default)]
+    pub dispatch: serde_json::Value,
+
     #[serde(default)]
     pub flags: ProjectFlags,
 }
@@ -243,6 +247,14 @@ impl DbtProject {
         let value = self.packages_install_path.as_str()?;
         (!value.trim().is_empty() && !["{{", "{%", "{#"].iter().any(|mark| value.contains(mark)))
             .then(|| project_dir.join(value))
+    }
+
+    /// Return the settings used to resolve project macro namespaces and dispatch.
+    pub fn macro_resolution(&self) -> MacroResolution {
+        MacroResolution {
+            root_namespace: self.name.clone(),
+            dispatch_overrides: DispatchOverrides::from_project(&self.dispatch),
+        }
     }
 
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {
@@ -451,6 +463,62 @@ pub struct ResolvedPaths {
     pub allow_jinja_file_extensions: bool,
     /// Whether each setting was written in `dbt_project.yml`.
     pub origins: PathOrigins,
+}
+
+/// Project metadata needed to resolve macro ownership and dispatch in SQL mode.
+#[derive(Debug, Clone)]
+pub struct MacroResolution {
+    pub(crate) root_namespace: String,
+    pub(crate) dispatch_overrides: DispatchOverrides,
+}
+
+/// Namespaces for which the root's default dispatch order cannot be assumed.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum DispatchOverrides {
+    /// No project dispatch overrides were configured.
+    #[default]
+    None,
+    /// The namespaces with configured overrides, including empty search orders.
+    Namespaces(Vec<String>),
+    /// The affected namespaces could not be determined from the configuration.
+    Unknown,
+}
+
+impl DispatchOverrides {
+    fn from_project(value: &serde_json::Value) -> Self {
+        if value.is_null() {
+            return Self::None;
+        }
+        let Some(entries) = value.as_array() else {
+            return Self::Unknown;
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let Some(name) = entry
+                .get("macro_namespace")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return Self::Unknown;
+            };
+            // A templated namespace could resolve to any name.
+            if ["{{", "{%", "{#"]
+                .iter()
+                .any(|marker| name.contains(marker))
+            {
+                return Self::Unknown;
+            }
+            names.push(name.to_owned());
+        }
+        Self::Namespaces(names)
+    }
+
+    pub(crate) fn affects(&self, namespace: &str) -> bool {
+        match self {
+            Self::None => false,
+            Self::Namespaces(names) => names.iter().any(|name| name == namespace),
+            Self::Unknown => true,
+        }
+    }
 }
 
 /// The origin of each `*-paths` setting.
