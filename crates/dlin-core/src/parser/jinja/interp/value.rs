@@ -118,6 +118,8 @@ pub(crate) enum AValue {
     Unknown(Causes),
     Heap(HeapId),
     Macro(MacroRef),
+    /// A package receiver for macro lookup. Ownership is checked by the library.
+    MacroNamespace(Arc<str>),
     Builtin(Builtin),
     /// The relation returned by `ref()` or `source()`.
     Relation,
@@ -150,6 +152,7 @@ impl AValue {
                     }
             }
             (AValue::Builtin(a), AValue::Builtin(b)) => a == b,
+            (AValue::MacroNamespace(a), AValue::MacroNamespace(b)) => a == b,
             (AValue::Relation, AValue::Relation) => true,
             (AValue::Context(a), AValue::Context(b)) => a == b,
             _ => false,

@@ -228,11 +228,11 @@ fn build_dag_quietly(
             let files = parser::discovery::discover_files(&paths)?;
             let config_diagnostics =
                 parser::discovery::config_diagnostics(&paths, &files, project_dir, &project.name);
-            let build = graph::builder::build_graph_report(
+            let build = graph::builder::build_graph_report_with_macro_resolution(
                 project_dir,
-                &project.name,
                 &files,
                 &project.vars,
+                &project.macro_resolution(),
             )?;
             Ok(DagBuild {
                 build,

@@ -16,7 +16,10 @@ impl<'a> Interp<'a> {
                 Some(HeapObj::Clobbered(causes)) => Truth::Unknown(causes.clone()),
                 None => Truth::Known(false),
             },
-            AValue::Macro(_) | AValue::Builtin(_) | AValue::Relation => Truth::Known(true),
+            AValue::Macro(_)
+            | AValue::Builtin(_)
+            | AValue::Relation
+            | AValue::MacroNamespace(_) => Truth::Known(true),
             AValue::Context(object) => {
                 if object.path.as_ref() == object.root {
                     Truth::Known(true)
@@ -103,6 +106,7 @@ impl<'a> Interp<'a> {
                 Err(self.unsupported(format!("macro value {}", def.def.name), span))
             }
             AValue::Builtin(_) => Err(self.unsupported("function value", span)),
+            AValue::MacroNamespace(_) => Err(self.unsupported("macro namespace value", span)),
         }
     }
 
@@ -288,7 +292,7 @@ impl<'a> Interp<'a> {
                 self.test(st, name, &values, span)
             }
             ExprKind::GetAttr { expr, name } => {
-                let object = self.eval(st, expr)?;
+                let object = self.eval_attribute_receiver(st, expr)?;
                 self.get_attr(st, &object, name, span)
             }
             ExprKind::GetItem { expr, subscript } => {
@@ -603,6 +607,18 @@ impl<'a> Interp<'a> {
         Some(AValue::Builtin(builtin))
     }
 
+    pub(super) fn eval_attribute_receiver(&mut self, st: &mut State, expr: &Expr) -> Ev<AValue> {
+        if let ExprKind::Var(name) = &expr.kind {
+            self.tick(Some(expr.span))?;
+            return Ok(st
+                .lookup(name)
+                .cloned()
+                .or_else(|| self.global(name, expr.span))
+                .unwrap_or_else(|| AValue::MacroNamespace(name.clone())));
+        }
+        self.eval(st, expr)
+    }
+
     pub(super) fn get_attr(&self, st: &State, object: &AValue, name: &str, span: Span) -> AValue {
         match object {
             AValue::Known(value) => match value.get_attr(name) {
@@ -656,6 +672,16 @@ impl<'a> Interp<'a> {
             AValue::Builtin(Builtin::Config) if matches!(name, "get" | "require") => {
                 AValue::Builtin(Builtin::ConfigGet)
             }
+            AValue::MacroNamespace(namespace) => self
+                .library
+                .namespace_member(namespace, name)
+                .unwrap_or_else(|| {
+                    AValue::Unknown(Causes::one(DependencyReason::UnsupportedMacroNamespace {
+                        namespace: namespace.to_string(),
+                        macro_name: name.to_owned(),
+                        at: self.site(span),
+                    }))
+                }),
             AValue::Macro(_) | AValue::Builtin(_) => AValue::undefined(),
         }
     }

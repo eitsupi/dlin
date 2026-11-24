@@ -1140,17 +1140,35 @@ pub fn build_graph(
 }
 
 /// Like [`build_graph`], also returning the gaps found while building.
+///
+/// Use [`build_graph_report_with_macro_resolution`] when project dispatch
+/// settings are available. Without those settings, dispatch stays unresolved.
 pub fn build_graph_report(
     project_dir: &Path,
     project_name: &str,
     files: &DiscoveredFiles,
     vars: &HashMap<String, serde_json::Value>,
 ) -> Result<GraphBuild> {
+    let resolution = crate::parser::project::MacroResolution {
+        root_namespace: project_name.to_owned(),
+        dispatch_overrides: crate::parser::project::DispatchOverrides::Unknown,
+    };
+    build_graph_report_with_macro_resolution(project_dir, files, vars, &resolution)
+}
+
+/// Build the SQL graph with the macro settings from
+/// [`DbtProject::macro_resolution`](crate::parser::project::DbtProject::macro_resolution).
+pub fn build_graph_report_with_macro_resolution(
+    project_dir: &Path,
+    files: &DiscoveredFiles,
+    vars: &HashMap<String, serde_json::Value>,
+    resolution: &crate::parser::project::MacroResolution,
+) -> Result<GraphBuild> {
+    let project_name = resolution.root_namespace.as_str();
     let mut skipped = files.skipped_inputs.clone();
     let skipped_before_macros = skipped.len();
-    let library = load_macro_library(files, &mut skipped).with_root(
-        project_name,
-        files.dispatch_overrides.clone(),
+    let library = load_macro_library(files, &mut skipped).with_resolution(
+        resolution,
         files.macro_inventory_incomplete || skipped.len() != skipped_before_macros,
     );
     // SQL mode analyses the root project. Its own package-scoped vars

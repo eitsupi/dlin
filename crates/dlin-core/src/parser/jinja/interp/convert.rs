@@ -412,10 +412,20 @@ impl Converter {
                 expr: self.boxed(&test.expr),
                 args: self.args(&test.args),
             },
-            ast::Expr::GetAttr(attr) => ExprKind::GetAttr {
-                expr: self.boxed(&attr.expr),
-                name: Arc::from(attr.name),
-            },
+            ast::Expr::GetAttr(attr) => {
+                let expr = self.boxed(&attr.expr);
+                return Expr {
+                    span: Span {
+                        start: expr.span.start,
+                        line: expr.span.line,
+                        ..span
+                    },
+                    kind: ExprKind::GetAttr {
+                        expr,
+                        name: Arc::from(attr.name),
+                    },
+                };
+            }
             ast::Expr::GetItem(item) => ExprKind::GetItem {
                 expr: self.boxed(&item.expr),
                 subscript: self.boxed(&item.subscript_expr),

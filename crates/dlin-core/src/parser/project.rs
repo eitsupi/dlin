@@ -249,6 +249,14 @@ impl DbtProject {
             .then(|| project_dir.join(value))
     }
 
+    /// Return the settings used to resolve project macro namespaces and dispatch.
+    pub fn macro_resolution(&self) -> MacroResolution {
+        MacroResolution {
+            root_namespace: self.name.clone(),
+            dispatch_overrides: DispatchOverrides::from_project(&self.dispatch),
+        }
+    }
+
     pub fn resolve_paths(&self, project_dir: &Path) -> ResolvedPaths {
         let resolve = |paths: &[String]| -> Vec<PathBuf> {
             paths
@@ -264,7 +272,6 @@ impl DbtProject {
             macro_paths: resolve(&self.macro_paths),
             analysis_paths: resolve(&self.analysis_paths),
             allow_jinja_file_extensions: self.flags.allow_jinja_file_extensions,
-            dispatch_overrides: DispatchOverrides::from_project(&self.dispatch),
             origins: PathOrigins {
                 model_paths: self.model_paths.origin(),
                 seed_paths: self.seed_paths.origin(),
@@ -456,13 +463,18 @@ pub struct ResolvedPaths {
     pub allow_jinja_file_extensions: bool,
     /// Whether each setting was written in `dbt_project.yml`.
     pub origins: PathOrigins,
-    /// Project dispatch settings that can change the default macro search order.
-    pub dispatch_overrides: DispatchOverrides,
+}
+
+/// Project metadata needed to resolve macro ownership and dispatch in SQL mode.
+#[derive(Debug, Clone)]
+pub struct MacroResolution {
+    pub(crate) root_namespace: String,
+    pub(crate) dispatch_overrides: DispatchOverrides,
 }
 
 /// Namespaces for which the root's default dispatch order cannot be assumed.
 #[derive(Debug, Clone, Default)]
-pub enum DispatchOverrides {
+pub(crate) enum DispatchOverrides {
     /// No project dispatch overrides were configured.
     #[default]
     None,
@@ -575,7 +587,6 @@ impl ResolvedPaths {
             analysis_paths: resolve(&["analyses"]),
             allow_jinja_file_extensions: false,
             origins: PathOrigins::default(),
-            dispatch_overrides: DispatchOverrides::default(),
         }
     }
 }

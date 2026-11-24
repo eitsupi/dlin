@@ -1282,6 +1282,13 @@ fn complex_var_template_chains_share_the_parser_token_limit() {
             if at.var_template.as_ref().unwrap().names == ["0", "1"]));
 }
 
+fn root_macro_resolution() -> crate::parser::project::MacroResolution {
+    crate::parser::project::MacroResolution {
+        root_namespace: "root".to_owned(),
+        dispatch_overrides: Default::default(),
+    }
+}
+
 #[test]
 fn root_namespace_and_dispatch_use_the_selected_macro_as_a_callable() {
     let library = library(&[r#"
@@ -1293,7 +1300,7 @@ fn root_namespace_and_dispatch_use_the_selected_macro_as_a_callable() {
 {% endmacro %}
 {% macro never_called() %}{{ ref('unused') }}{% endmacro %}
 "#])
-    .with_root("root", Default::default(), false);
+    .with_resolution(&root_macro_resolution(), false);
     let e = extract_dependencies(
         r#"{{ root.wrapper('wrapped') }}
 {{ adapter.dispatch('choose', macro_namespace='root')('direct') }}
@@ -1320,7 +1327,7 @@ fn namespace_lookup_respects_lexical_bindings_and_ownership() {
 {% macro local() %}{{ ref('from_variable') }}{% endmacro %}
 {% macro default__choose() %}{{ ref('from_dispatch') }}{% endmacro %}
 "#])
-    .with_root("root", Default::default(), false);
+    .with_resolution(&root_macro_resolution(), false);
     let e = extract_dependencies(
         r#"{{ external.pick() }}
 {{ obj.pick() }}
@@ -1342,7 +1349,7 @@ fn namespace_lookup_respects_lexical_bindings_and_ownership() {
 fn dispatch_preserves_unknown_paths_and_arguments() {
     let library =
         library(&[r#"{% macro default__choose() %}{{ ref('conditional') }}{% endmacro %}"#])
-            .with_root("root", Default::default(), false);
+            .with_resolution(&root_macro_resolution(), false);
     let e = extract_dependencies(
         r#"{{ ref('direct') }}
 {% if target.name == 'prod' %}
@@ -1390,7 +1397,8 @@ fn dispatch_requires_proof_of_a_single_root_implementation() {
         ),
         (r#"{{ adapter.dispatch('choose', 'root')() }}"#, default),
     ] {
-        let library = library(&[default, extra_macro]).with_root("root", Default::default(), false);
+        let library =
+            library(&[default, extra_macro]).with_resolution(&root_macro_resolution(), false);
         let e = extract_dependencies(sql, &library, &HashMap::new());
         assert!(e.refs.is_empty(), "{sql}, {extra_macro}");
         assert_eq!(codes(&e), ["unsupported_dispatch"], "{sql}, {extra_macro}");
@@ -1419,4 +1427,75 @@ fn dispatch_and_namespace_call_sites_include_the_receiver() {
         e.reasons[0].at().unwrap().expr.as_deref(),
         Some(r#"external.pick()"#)
     );
+}
+
+#[test]
+fn namespace_macro_attributes_are_first_class_callables() {
+    let library = library(&[r#"
+{% macro wrapper(name) %}{{ ref(name) }}{% endmacro %}
+{% macro invoke(fn, name) %}{{ fn(name) }}{% endmacro %}
+{% macro unused() %}{{ ref('unused') }}{% endmacro %}
+{% macro local(name) %}{{ ref('local_' ~ name) }}{% endmacro %}
+"#])
+    .with_resolution(&root_macro_resolution(), false);
+    let e = extract_dependencies(
+        r#"{% set wrapper = root.wrapper %}
+{{ wrapper('assigned') }}
+{{ invoke(root.wrapper, 'passed') }}
+{% set unused = root.unused %}
+{% set root = {'wrapper': local} %}
+{% set shadowed = root.wrapper %}
+{{ shadowed('shadowed') }}"#,
+        &library,
+        &HashMap::new(),
+    );
+    assert_eq!(ref_names(&e), ["assigned", "local_shadowed", "passed"]);
+    assert!(e.reasons.is_empty(), "{:?}", e.reasons);
+}
+
+#[test]
+fn unresolved_namespace_members_are_reported_when_used_as_callables() {
+    let library = library(&[r#"
+{% macro wrapper(name) %}{{ ref(name) }}{% endmacro %}
+{% macro invoke(fn, name) %}{{ fn(name) }}{% endmacro %}
+"#])
+    .with_resolution(&root_macro_resolution(), false);
+    let e = extract_dependencies(
+        r#"{% set unused = other.wrapper %}
+{% set external = dbt_utils.wrapper %}
+{{ external('external') }}
+{{ invoke(unknown.wrapper, 'unknown') }}
+{% set missing = root.missing %}
+{{ missing('missing') }}"#,
+        &library,
+        &HashMap::new(),
+    );
+    assert!(e.refs.is_empty());
+    assert_eq!(e.reasons.len(), 3);
+    for (namespace, macro_name) in [
+        ("dbt_utils", "wrapper"),
+        ("unknown", "wrapper"),
+        ("root", "missing"),
+    ] {
+        assert!(e.reasons.iter().any(|reason| matches!(reason,
+            DependencyReason::UnsupportedMacroNamespace { namespace: ns, macro_name: name, at }
+                if ns == namespace && name == macro_name
+                    && at.expr.as_deref() == Some(&format!("{namespace}.{macro_name}")))));
+    }
+}
+
+#[test]
+fn double_underscore_in_ordinary_macro_name_can_block_dispatch() {
+    let library = library(&[r#"
+{% macro default__choose() %}{{ ref('default') }}{% endmacro %}
+{% macro ordinary_helper__choose() %}{{ ref('ordinary') }}{% endmacro %}
+"#])
+    .with_resolution(&root_macro_resolution(), false);
+    let e = extract_dependencies(
+        r#"{{ adapter.dispatch('choose', 'root')() }}"#,
+        &library,
+        &HashMap::new(),
+    );
+    assert!(e.refs.is_empty());
+    assert_eq!(codes(&e), ["unsupported_dispatch"]);
 }

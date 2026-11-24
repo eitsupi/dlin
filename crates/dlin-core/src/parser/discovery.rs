@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use super::project::{DispatchOverrides, ResolvedPaths, is_sql_file};
+use super::project::{ResolvedPaths, is_sql_file};
 use crate::graph::dependency::{
     ConfigDiagnostic, InputFailure, InputKind, InputStage, PathOrigin, PathSetting, SettingPath,
     relative_display_path,
@@ -19,8 +19,6 @@ pub struct DiscoveredFiles {
     pub macro_sql_files: Vec<PathBuf>,
     /// Whether discovery could not fully inspect the root's macro search paths.
     pub macro_inventory_incomplete: bool,
-    /// Project dispatch settings that can change the default macro search order.
-    pub dispatch_overrides: DispatchOverrides,
     /// Inputs that could not be inspected or listed. Discovery carried on
     /// without them. Sorted and deduplicated.
     pub skipped_inputs: Vec<SkippedInput>,
@@ -76,10 +74,7 @@ struct WalkedFiles {
 /// SQL files under `generic/` in a test path define generic tests, so they
 /// are macro files, as in dbt. They come after the files of `macro-paths`.
 pub fn discover_files(paths: &ResolvedPaths) -> Result<DiscoveredFiles> {
-    let mut discovered = DiscoveredFiles {
-        dispatch_overrides: paths.dispatch_overrides.clone(),
-        ..DiscoveredFiles::default()
-    };
+    let mut discovered = DiscoveredFiles::default();
     let mut generic_test_sql_files = Vec::new();
 
     for (setting, dirs, origin) in paths.settings() {
@@ -409,7 +404,6 @@ mod tests {
             macro_paths: vec![],
             analysis_paths: vec![],
             allow_jinja_file_extensions: false,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
 
@@ -445,7 +439,6 @@ mod tests {
             macro_paths: vec![],
             analysis_paths: vec![analyses_dir],
             allow_jinja_file_extensions: false,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
 
@@ -503,7 +496,6 @@ mod tests {
             macro_paths: vec![],
             analysis_paths: vec![],
             allow_jinja_file_extensions: true,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
 
@@ -543,7 +535,6 @@ mod tests {
             macro_paths: vec![root.join("macros"), root.join("tests/generic")],
             analysis_paths: vec![],
             allow_jinja_file_extensions: false,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
 
@@ -597,7 +588,6 @@ mod tests {
             macro_paths: vec![tmp.path().join("macros")],
             analysis_paths: vec![tmp.path().join("analyses")],
             allow_jinja_file_extensions: true,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
         let discovered = discover_files(&paths).unwrap();
@@ -617,7 +607,6 @@ mod tests {
             macro_paths: vec![],
             analysis_paths: vec![],
             allow_jinja_file_extensions: false,
-            dispatch_overrides: Default::default(),
             origins: Default::default(),
         };
 

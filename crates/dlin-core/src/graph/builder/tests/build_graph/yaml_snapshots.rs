@@ -632,7 +632,14 @@ dispatch:
         .unwrap();
         let project = crate::parser::project::DbtProject::load(root).unwrap();
         let files = crate::parser::discovery::discover_files(&project.resolve_paths(root)).unwrap();
-        let graph = build_graph(root, &project.name, &files, &project.vars).unwrap();
+        let graph = super::super::super::build_graph_report_with_macro_resolution(
+            root,
+            &files,
+            &project.vars,
+            &project.macro_resolution(),
+        )
+        .unwrap()
+        .into_graph();
         assert_eq!(graph.edge_count(), usize::from(expected), "{config}");
         let consumer = graph
             .node_weights()
