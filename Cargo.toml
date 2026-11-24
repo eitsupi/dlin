@@ -39,8 +39,8 @@ insta = "1"
 serial_test = "4.0.1"
 
 # internal
-dlin-core = { version = "0.3.0-alpha.2", path = "crates/dlin-core" }
-sqllineage = { package = "dlin-sqllineage", version = "0.3.0-alpha.2", path = "crates/dlin-sqllineage" }
+dlin-core = { version = "0.3.0", path = "crates/dlin-core" }
+sqllineage = { package = "dlin-sqllineage", version = "0.3.0", path = "crates/dlin-sqllineage" }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin_include)'] }
